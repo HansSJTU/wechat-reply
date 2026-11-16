@@ -2,6 +2,43 @@
 
 Read WeChat 4.x (macOS) local messages and answer selected chats with an LLM.
 
+## How it works (原理)
+
+WeChat has no bot API on macOS, so the bot works from both ends of the desktop client: it reads
+messages from WeChat's own local database as they are written, and sends replies through WeChat's
+own internal send path.
+
+```
+ WeChat writes a message          ┌──────────── wxbot ──────────────┐
+ to message_0.db-wal  ──kqueue──▶ │ 1 read    decrypt changed pages │
+ (SQLCipher, encrypted)           │ 2 understand  text / voice→STT  │
+                                  │               / image           │
+                                  │ 3 reply   debounce → LLM        │
+ WeChat sends it  ◀──Frida hook── │ 4 send    native send task      │
+                                  └─────────────────────────────────┘
+```
+
+0. **Key (once).** The databases are SQLCipher 4 (AES-256-CBC, HMAC-SHA512 per 4 KB page). The
+   key exists only in WeChat's memory, so it is captured once: an lldb script breaks on the
+   CommonCrypto calls SQLCipher makes (`CCKeyDerivationPBKDF`, `CCCryptorCreate`, `CCHmacInit`)
+   in a re-signed debuggable copy of WeChat, and `verify_keys.py` keeps the keys whose HMAC
+   authenticates page 1 of a database. They go to `secrets/` and stay valid until re-login.
+1. **Read.** New messages land in the database's `-wal` file first. `source.py` watches it with
+   kqueue (no polling); on each write `livedb.py` decrypts only the pages whose ciphertext changed
+   into a private in-memory SQLite copy, so plaintext never touches the disk. New rows of the
+   `Msg_<md5(chat)>` tables become events (zstd-decompressed content, parsed XML for app messages).
+2. **Understand.** Text is used as is. Voice is SILK in `media_0.db`, decoded to wav and sent to
+   speech-to-text: `combo` asks several engines in parallel and lets an LLM merge their guesses,
+   which is what makes dialect speech readable (`stt/README.md`). Images are decrypted from
+   WeChat's `.dat` files (AES head + XOR tail) and attached to the LLM call.
+3. **Reply.** One thread per chat waits for a burst of messages to end (`debounce_seconds`),
+   sends the last few hours of the conversation to the LLM, and gets one short reply. Rate limits,
+   a stop file and per-group mute keep it in check.
+4. **Send.** A Frida agent inside the debug copy of WeChat watches the client's own send routine.
+   When you send any text by hand, it captures that call's context (the *seed*) and from then on
+   builds new send tasks with it, so replies leave through WeChat itself like a normal message.
+   Without a seed nothing can be sent, which is why one manual send is needed after each launch.
+
 ## Reply bot (`wxbot/`, run by `monitor.py`)
 
 A resident LaunchAgent that answers the chats in `config.toml` (your own chats, location and prompts go
@@ -105,3 +142,8 @@ Labeling for fine-tuning a local Wu model: `uv run stt/label.py serve` (see `stt
   (`WCDB_CT_message_content = 4`). Types: 1 text, 3 image, 34 voice, 43 video, 47 emoji, 49 app/link/file.
 - Voice: `media_0.db` → `VoiceInfo.voice_data`, `0x02` + SILK v3 (strip first byte, decode with `pilk`, 24 kHz).
 - Images: `msg/attach/<md5(chat)>/<YYYY-MM>/Img/<md5>[_t|_h].dat`; full-size only after download.
+
+## License
+
+GPL-3.0-or-later, see [LICENSE](LICENSE). The native sender is adapted from GPL-3.0 code; its
+provenance is in `tools/NATIVE_SEND_NOTICE.md`.
