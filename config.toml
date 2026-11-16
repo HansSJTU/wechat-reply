@@ -1,0 +1,43 @@
+# Shared defaults. Put your own chats, location and prompts in config.local.toml (gitignored);
+# it overrides this file key by key (tables are merged).
+#
+# Chats the bot answers: remark, nickname, alias, or username (wxid_… / …@chatroom).
+# `uv run monitor.py chats` lists them. Messages this account sends itself are ignored.
+chats = []                  # e.g. ["wxid_xxxxxxxx"]
+# Recorded like `listen`, answered only when a message @-mentions this account. Voices here
+# are never sent to cloud STT; the LLM sees them as [语音].
+mention = []                # e.g. ["12345678901@chatroom"]
+# Listen-only: recorded to data/messages.jsonl (voice saved as wav for stt/label.py), never answered,
+# no STT or LLM calls.
+listen = []
+
+[reply]
+debounce_seconds = 2        # wait this long after the last message of a burst, then reply once
+history_hours = 12          # conversation window sent to the LLM
+max_age_seconds = 600       # don't answer backlog older than this (e.g. after downtime)
+max_per_minute = 6          # per chat
+pending_ttl_seconds = 300   # a reply held for a send context is dropped after this
+stop_file = "data/STOP"     # touch it to pause all replies; delete to resume
+mute_hours = 24             # "@<me> 关闭" in a chat: record only, no LLM, for this long
+mute_words = ["关闭"]
+unmute_words = ["打开", "开启"]  # "@<me> 打开": resume early
+
+[llm]                       # placeholder: OpenAI Responses API chat bot (key: openai_api_key in secrets/stt_keys.toml)
+model = "gpt-5.5"
+reasoning_effort = "medium"  # low skips the fallback search when the weather tool comes back empty
+max_images = 3              # only the newest N images in the window are attached
+web_search = true           # OpenAI built-in web search (weather, news, …); adds a few seconds when used
+location = { country = "CN", region = "Beijing", city = "Beijing" }   # where "today's weather" is
+timeout_seconds = 60
+system_prompt = """你是一个友好的聊天伙伴，正在微信上和朋友聊天。
+用简体中文，像真人发微信一样简短自然地回复，一般一两句话，不用 Markdown。
+消息里的 [语音] 是语音转写的文字，可能有错字，按意思理解；[图片] 后面附有图片。
+需要实时信息（天气、新闻、价格等）就上网搜索，用中文关键词，例如“北京天气预报 今天”；如果天气工具没数据，就换关键词搜中国天气网等网页，别让对方自己去查。"""
+group_prompt = """这是一个微信群，每条消息前面是发言人的名字。
+只有被 @ 时你才会被叫出来：只回应 @ 你的那条消息，结合前面的群聊理解。单独一个 [语音] 是没转写的语音，听不到内容，别猜。"""
+
+[stt]
+provider = "combo"          # volc-file-2 + deepseek + openai -> deepseek-flash
+
+[media]
+image_wait_seconds = 0      # full images only download when opened in the client; use the thumbnail right away

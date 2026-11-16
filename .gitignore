@@ -1,0 +1,11 @@
+# keys and private message data — never commit
+secrets/
+data/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+# downloaded model weights (stt/local_wu.py)
+models/
+# personal chats, location and prompts (overrides config.toml)
+config.local.toml

@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>余姚话标注</title>
+<style>
+:root {
+  --bg: #f6f5f2; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a66; --line: #e3e1db;
+  --accent: #2f6f5e; --accent-ink: #ffffff; --soft: #eaf2ef; --warn: #b4441f; --warn-soft: #fbece6;
+  --done: #2f6f5e; --skip: #9a8f6a; --bad: #b4441f; --test: #5b5fa8;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161615; --panel: #1f1f1d; --ink: #ecebe6; --muted: #a09e97; --line: #33322f;
+    --accent: #6fb9a3; --accent-ink: #10201b; --soft: #1f2f2a; --warn: #f08a62; --warn-soft: #3a231a;
+    --done: #6fb9a3; --skip: #c4b88d; --bad: #f08a62; --test: #9ea2e6;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif; }
+header { display: flex; align-items: center; gap: 16px; padding: 12px 20px; border-bottom: 1px solid var(--line);
+  background: var(--panel); position: sticky; top: 0; z-index: 2; flex-wrap: wrap; }
+h1 { font-size: 17px; margin: 0; font-weight: 600; }
+.progress { flex: 1; min-width: 220px; display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; }
+.bar { flex: 1; height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; max-width: 320px; }
+.bar > div { height: 100%; background: var(--accent); width: 0; transition: width .3s; }
+.drafting { font-size: 12px; color: var(--muted); }
+main { display: grid; grid-template-columns: 300px 1fr; min-height: calc(100vh - 57px); }
+aside { border-right: 1px solid var(--line); background: var(--panel); overflow-y: auto; max-height: calc(100vh - 57px); position: sticky; top: 57px; }
+.tabs { display: flex; gap: 4px; padding: 10px; border-bottom: 1px solid var(--line); }
+.tabs button { flex: 1; border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 6px;
+  padding: 5px 0; cursor: pointer; font-size: 13px; }
+.tabs button.on { background: var(--soft); color: var(--ink); border-color: var(--accent); }
+.item { padding: 9px 14px; border-bottom: 1px solid var(--line); cursor: pointer; display: grid;
+  grid-template-columns: 14px 1fr auto; gap: 8px; align-items: center; }
+.item:hover { background: var(--soft); }
+.item.sel { background: var(--soft); box-shadow: inset 3px 0 0 var(--accent); }
+.dot { width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid var(--muted); }
+.dot.done { background: var(--done); border-color: var(--done); }
+.dot.skip { background: var(--skip); border-color: var(--skip); }
+.dot.bad { background: var(--bad); border-color: var(--bad); }
+.dot.exclude { background: var(--line); border-color: var(--muted); border-style: dashed; }
+.item.exclude .t { text-decoration: line-through; color: var(--muted); }
+.item > div { min-width: 0; }
+aside { overflow-x: hidden; }
+.item .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+.item .meta { font-size: 12px; color: var(--muted); }
+.tag { font-size: 11px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--test); color: var(--test); }
+section.editor { padding: 22px 28px; max-width: 900px; }
+.empty { color: var(--muted); padding: 40px 28px; }
+.head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.head .name { font-weight: 600; font-size: 16px; }
+.head .meta { color: var(--muted); font-size: 13px; }
+audio { width: 100%; margin: 6px 0 18px; }
+label.f { display: block; font-size: 13px; color: var(--muted); margin: 14px 0 6px; }
+.draft { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--line);
+  border-radius: 8px; margin-bottom: 6px; background: var(--panel); }
+.draft .src { font-size: 12px; color: var(--muted); width: 82px; flex: none; padding-top: 2px; }
+.draft .txt { flex: 1; }
+.draft button, .actions button { border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 13px; }
+textarea, input[type=text] { width: 100%; font: inherit; font-size: 17px; padding: 10px 12px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+textarea { min-height: 84px; resize: vertical; }
+textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+input[type=text] { font-size: 15px; }
+.oov { margin-top: 6px; font-size: 13px; color: var(--warn); background: var(--warn-soft); border-radius: 6px; padding: 4px 8px; display: none; }
+.actions { display: flex; gap: 8px; margin-top: 18px; flex-wrap: wrap; align-items: center; }
+.actions .primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; padding: 7px 16px; }
+.hint { font-size: 12px; color: var(--muted); margin-left: auto; }
+kbd { font: 11px ui-monospace, Menlo, monospace; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+.guide { margin-top: 26px; font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 12px; }
+.guide li { margin: 3px 0; }
+.saved { font-size: 13px; color: var(--done); }
+.hbtn { border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 6px;
+  padding: 5px 12px; cursor: pointer; font-size: 13px; }
+.gwarn { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.gwarn div { font-size: 13px; background: var(--soft); border-radius: 6px; padding: 4px 8px; display: flex; gap: 8px; align-items: center; }
+.gwarn b { color: var(--warn); }
+.gwarn button, .tools button { border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  border-radius: 5px; padding: 1px 8px; cursor: pointer; font-size: 12px; }
+.tools { margin-top: 6px; display: flex; gap: 8px; }
+dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--ink);
+  padding: 0; width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 64px); }
+dialog::backdrop { background: rgba(0,0,0,.35); }
+.dlg-head { display: flex; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--line); gap: 10px; }
+.dlg-head h2 { font-size: 16px; margin: 0; flex: 1; }
+.dlg-body { padding: 12px 18px; overflow-y: auto; max-height: calc(100vh - 200px); }
+.dlg-body p { font-size: 13px; color: var(--muted); margin: 0 0 10px; }
+.grow { display: grid; grid-template-columns: 1fr 1fr 1.6fr 28px; gap: 6px; margin-bottom: 6px; align-items: center; }
+.grow.h { font-size: 12px; color: var(--muted); }
+.grow input { font-size: 14px; padding: 6px 8px; }
+.grow .del { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 16px; }
+.dlg-foot { display: flex; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--line); }
+.dlg-foot .primary { background: var(--accent); color: var(--accent-ink); border: 1px solid var(--accent); border-radius: 6px; padding: 6px 16px; font-weight: 600; cursor: pointer; }
+.dlg-foot button { border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+@media (max-width: 560px) { .grow { grid-template-columns: 1fr 1fr 28px; } .grow input.av { grid-column: 1 / 3; } }
+@media (max-width: 760px) {
+  main { grid-template-columns: 1fr; }
+  aside { position: static; max-height: 240px; border-right: 0; border-bottom: 1px solid var(--line); }
+  section.editor { padding: 16px; }
+  .hint { display: none; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>余姚话标注</h1>
+  <div class="progress"><span id="prog">…</span><div class="bar"><div id="barfill"></div></div></div>
+  <span class="drafting" id="drafting"></span>
+  <button class="hbtn" id="glossBtn">说法表</button>
+</header>
+<main>
+  <aside>
+    <div class="tabs">
+      <button data-f="todo" class="on">待标注</button><button data-f="done">已完成</button><button data-f="all">全部</button>
+    </div>
+    <div id="list"></div>
+  </aside>
+  <section class="editor" id="editor"><div class="empty">加载中…</div></section>
+</main>
+<dialog id="gloss">
+  <div class="dlg-head"><h2>说法表</h2><button class="hbtn" id="glossClose">关闭</button></div>
+  <div class="dlg-body">
+    <p>每个余姚话说法定一个写法，以后都这样写。“别写成”里的写法出现在标注里时会提醒你替换（比如草稿按上海话写的「伊」「今朝」）。这张表以后也会交给 LLM 当词典用。</p>
+    <div class="grow h"><span>吴语写法</span><span>普通话意思</span><span>别写成（逗号分隔）</span><span></span></div>
+    <div id="grows"></div>
+    <button class="hbtn" id="gadd">＋ 新增一条</button>
+  </div>
+  <div class="dlg-foot"><button class="primary" id="gsave">保存</button><button id="gcancel">取消</button>
+    <span class="saved" id="gsaved" style="align-self:center"></span></div>
+</dialog>
+<script>
+const TARGET_MIN = 30;
+let items = [], drafters = [], vocab = new Set(), filter = "todo", sel = null;
+
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => (s || "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const status = it => it.label ? it.label.status : "";
+const fmtTime = t => t ? new Date(t * 1000).toLocaleString("zh-CN", {month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit"}) : "";
+
+async function load(keepSel = true) {
+  const r = await fetch("/api/items").then(r => r.json());
+  items = r.items; drafters = r.drafters;
+  $("#drafting").textContent = r.drafting ? "正在生成草稿…" : "";
+  renderProgress(); renderList();
+  if (!keepSel || !sel || !items.find(i => i.key === sel)) {
+    const first = visible()[0]; if (first) select(first.key); else $("#editor").innerHTML = '<div class="empty">没有需要标注的语音了。</div>';
+  }
+}
+
+function visible() {
+  return items.filter(it => filter === "all" || (filter === "todo" ? !status(it) : !!status(it))).slice().reverse();
+}
+
+function renderProgress() {
+  const done = items.filter(i => status(i) === "done");
+  const sum = s => done.filter(i => i.split === s).reduce((a, i) => a + i.seconds, 0) / 60;
+  const tr = sum("train"), te = sum("test");
+  $("#prog").textContent = `已标注 ${done.length}/${items.length} 条 · 训练 ${tr.toFixed(1)} 分钟 · 测试 ${te.toFixed(1)} 分钟 · 目标 ${TARGET_MIN} 分钟`;
+  $("#barfill").style.width = Math.min(100, (tr + te) / TARGET_MIN * 100) + "%";
+}
+
+function renderList() {
+  $("#list").innerHTML = visible().map(it => {
+    const txt = (it.label && it.label.wu) || (it.drafts[drafters[0]] ?? "（草稿生成中）");
+    return `<div class="item ${it.key === sel ? "sel" : ""} ${status(it)}" data-k="${esc(it.key)}">
+      <span class="dot ${status(it)}"></span>
+      <div><div class="t">${esc(txt)}</div><div class="meta">${esc(it.key)} · ${it.seconds}s · ${fmtTime(it.time)}</div></div>
+      ${it.split === "test" ? '<span class="tag">测试</span>' : ""}</div>`;
+  }).join("") || '<div class="empty">无</div>';
+  document.querySelectorAll(".item").forEach(el => el.onclick = () => select(el.dataset.k));
+}
+
+function select(key) {
+  sel = key;
+  const it = items.find(i => i.key === key);
+  const lab = it.label || {};
+  const start = lab.wu ?? it.drafts[drafters[0]] ?? "";
+  $("#editor").innerHTML = `
+    <div class="head"><span class="name">${esc(it.key)}</span>
+      <span class="meta">${esc(it.sender || "")} · ${it.seconds}s · ${fmtTime(it.time)}</span>
+      ${it.split === "test" ? '<span class="tag">测试集：只用来评估，不参与训练</span>' : ""}
+      ${lab.status ? `<span class="saved">已保存（${{done: "完成", skip: "跳过", bad: "坏音频", exclude: "不使用：不进训练集也不进测试集"}[lab.status]}）</span>` : ""}</div>
+    <audio id="au" controls autoplay src="/audio/${encodeURIComponent(it.key)}"></audio>
+    <label class="f">模型草稿（点“用这个”填进下面）</label>
+    ${drafters.map((d, n) => `<div class="draft"><span class="src">${esc(d)}</span>
+      <span class="txt">${esc(it.drafts[d] ?? "（生成中…）")}</span>
+      <button data-d="${esc(d)}">用这个 <kbd>⌃${n + 1}</kbd></button></div>`).join("")}
+    <label class="f">实际说的话（用吴语字，照读音写，不要翻译成普通话）</label>
+    <textarea id="wu">${esc(start)}</textarea>
+    <div class="oov" id="oov"></div>
+    <div class="gwarn" id="gwarn"></div>
+    <div class="tools"><button id="toGloss">把选中的字加入说法表</button></div>
+    <label class="f">普通话意思（可选，方便以后评估）</label>
+    <input type="text" id="meaning" value="${esc(lab.meaning ?? it.meaning_ref ?? "")}">
+    <div class="actions">
+      <button class="primary" id="save">保存，下一条</button>
+      <button id="skip">听不清 / 跳过</button>
+      <button id="bad">坏音频</button>
+      <button id="exclude" title="文字照样保存，但这条不进训练集也不进测试集">不使用</button>
+      <button id="replay">重放</button>
+      <span class="hint"><kbd>⌘/Ctrl ⏎</kbd> 保存 · <kbd>Esc</kbd> 重放 · <kbd>⌃1</kbd><kbd>⌃2</kbd> 用草稿</span>
+    </div>
+    <ul class="guide">
+      <li>写<b>说话人实际说的音</b>，用常见吴语字：侬、阿拉、伊、搿、呒没、覅、葛末、咾……。不确定的字写读音最接近的常用字。</li>
+      <li>常说的专有词（食物、药名、地名……）写真实写法，模型就是靠这些学会的。</li>
+      <li>标点可写可不写，导出时会去掉。夹杂普通话的部分照普通话写。</li>
+      <li>整条是普通话也可以标，帮助模型分清普通话和余姚话。</li>
+      <li>不想用的（隐私内容、发给机器人的测试话……）点“不使用”：文字照样保存，但不进训练集也不进测试集，随时可以改回来。</li>
+    </ul>`;
+  document.querySelectorAll(".draft button").forEach(b => b.onclick = () => useDraft(b.dataset.d));
+  $("#save").onclick = () => save("done");
+  $("#skip").onclick = () => save("skip");
+  $("#bad").onclick = () => save("bad");
+  $("#exclude").onclick = () => save("exclude");
+  $("#replay").onclick = replay;
+  $("#wu").oninput = () => { checkOov(); checkGloss(); };
+  $("#toGloss").onclick = () => {
+    const ta = $("#wu"); const s = ta.value.slice(ta.selectionStart, ta.selectionEnd).trim();
+    openGloss(s ? {wu: s, mandarin: "", avoid: []} : null);
+  };
+  checkOov(); checkGloss();
+  const ta = $("#wu"); ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+  renderList();
+}
+
+function useDraft(d) {
+  const it = items.find(i => i.key === sel);
+  if (it && it.drafts[d] != null) { $("#wu").value = it.drafts[d]; checkOov(); $("#wu").focus(); }
+}
+
+function checkOov() {
+  if (!vocab.size) return;
+  const bad = [...new Set([...$("#wu").value].filter(c => /\p{Script=Han}/u.test(c) && !vocab.has(c)))];
+  const el = $("#oov");
+  el.style.display = bad.length ? "block" : "none";
+  el.textContent = bad.length ? `这些字不在小模型的字表里，训练时学不到：${bad.join(" ")}（可换成读音相同的常用字）` : "";
+}
+
+// ---- 说法表
+let gloss = [];
+
+function checkGloss() {
+  const el = $("#gwarn"); if (!el) return;
+  const text = $("#wu").value;
+  const hits = [];
+  for (const e of gloss) for (const a of e.avoid || []) if (a && text.includes(a)) hits.push({a, e});
+  el.innerHTML = hits.map((h, i) => `<div>说法表：<b>${esc(h.a)}</b> → 写作「${esc(h.e.wu)}」${h.e.mandarin ? `（${esc(h.e.mandarin)}）` : ""}
+    <button data-i="${i}">替换</button></div>`).join("");
+  el.querySelectorAll("button").forEach(b => b.onclick = () => {
+    const h = hits[+b.dataset.i]; const ta = $("#wu");
+    ta.value = ta.value.split(h.a).join(h.e.wu); checkOov(); checkGloss(); ta.focus();
+  });
+}
+
+function growHtml(e) {
+  return `<div class="grow"><input class="wu" value="${esc(e.wu)}" placeholder="今末">
+    <input class="md" value="${esc(e.mandarin)}" placeholder="今天">
+    <input class="av" value="${esc((e.avoid || []).join("，"))}" placeholder="几么，今朝">
+    <button class="del" title="删除">×</button></div>`;
+}
+
+function renderGloss(extra) {
+  const rows = gloss.concat(extra ? [extra] : []);
+  $("#grows").innerHTML = rows.map(growHtml).join("");
+  $("#grows").querySelectorAll(".del").forEach(b => b.onclick = () => b.parentElement.remove());
+}
+
+function openGloss(extra) {
+  renderGloss(extra); $("#gsaved").textContent = "";
+  $("#gloss").showModal();
+  const last = [...$("#grows").querySelectorAll(extra ? ".md" : ".wu")].pop();
+  if (extra && last) last.focus();
+}
+
+async function saveGloss() {
+  const entries = [...$("#grows").querySelectorAll(".grow")].map(r => ({
+    wu: $(".wu", r).value, mandarin: $(".md", r).value, avoid: $(".av", r).value}));
+  const r = await fetch("/api/glossary", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({entries})}).then(r => r.json());
+  if (!r.ok) { $("#gsaved").textContent = "保存失败"; return; }
+  gloss = r.entries; $("#glossBtn").textContent = `说法表（${gloss.length}）`;
+  $("#gloss").close(); checkGloss();
+}
+
+$("#glossBtn").onclick = () => openGloss(null);
+$("#glossClose").onclick = $("#gcancel").onclick = () => $("#gloss").close();
+$("#gadd").onclick = () => { $("#grows").insertAdjacentHTML("beforeend", growHtml({wu: "", mandarin: "", avoid: []}));
+  const rows = $("#grows").querySelectorAll(".grow"); const r = rows[rows.length - 1];
+  $(".del", r).onclick = () => r.remove(); $(".wu", r).focus(); };
+$("#gsave").onclick = saveGloss;
+fetch("/api/glossary").then(r => r.json()).then(r => { gloss = r.entries;
+  $("#glossBtn").textContent = `说法表（${gloss.length}）`; checkGloss(); });
+
+function replay() { const a = $("#au"); if (a) { a.currentTime = 0; a.play(); } }
+
+async function save(st) {
+  const wu = $("#wu").value.trim();
+  if (st === "done" && !wu) { $("#wu").focus(); return; }
+  const r = await fetch("/api/label", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({key: sel, wu, meaning: $("#meaning").value, status: st})}).then(r => r.json());
+  if (!r.ok) { alert("保存失败"); return; }
+  const it = items.find(i => i.key === sel); it.label = r.label;
+  renderProgress();
+  const vis = visible(); const idx = vis.findIndex(i => i.key === sel);
+  const next = filter === "todo" ? vis[0] : vis[idx + 1];
+  if (next && next.key !== sel) select(next.key); else { renderList(); select(sel); }
+}
+
+document.addEventListener("keydown", e => {
+  if ($("#gloss").open) return;  // Esc closes the dialog; no label shortcuts behind it
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); save("done"); }
+  else if (e.key === "Escape") { e.preventDefault(); replay(); }
+  else if (e.ctrlKey && !e.metaKey && /^[1-9]$/.test(e.key)) { const d = drafters[+e.key - 1]; if (d) { e.preventDefault(); useDraft(d); } }
+});
+document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
+  filter = b.dataset.f; document.querySelectorAll(".tabs button").forEach(x => x.classList.toggle("on", x === b));
+  renderList(); const v = visible(); if (v.length && !v.find(i => i.key === sel)) select(v[0].key);
+});
+
+fetch("/api/vocab").then(r => r.json()).then(r => { vocab = new Set([...r.chars]); checkOov(); });
+load(false);
+setInterval(() => { if (document.activeElement && document.activeElement.id === "wu") return; load(true); }, 30000);
+</script>
+</body>
+</html>
