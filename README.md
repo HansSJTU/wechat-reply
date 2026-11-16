@@ -39,6 +39,80 @@ own internal send path.
    builds new send tasks with it, so replies leave through WeChat itself like a normal message.
    Without a seed nothing can be sent, which is why one manual send is needed after each launch.
 
+## Setup on a new Mac
+
+Everything below runs on the Mac where WeChat is logged in. Keys, config and recorded messages
+stay in the gitignored `secrets/`, `data/` and `config.local.toml`.
+
+**Requirements.** Apple silicon Mac; WeChat 4.x from the official installer in `/Applications`.
+Reading messages works across 4.x builds. **Sending works only on WeChat 4.2.0 build 270348
+(4.2.0.12, arm64)**: the sender has that build's internal addresses built in, and checks the UUID of
+`wechat.dylib` before touching anything (see "Other WeChat versions" below).
+
+1. **Tools.** Xcode Command Line Tools (`lldb`, `codesign`, `cc`) and [uv](https://docs.astral.sh/uv/):
+   ```bash
+   xcode-select --install
+   brew install uv
+   git clone https://github.com/HansSJTU/wechat-reply.git && cd wechat-reply
+   ```
+   Python dependencies are declared inline in the scripts; `uv run` installs them on first use.
+2. **Log in to WeChat** (`/Applications/WeChat.app`) and let it sync. To derive the image key later,
+   at least one received image must be in a chat; open it once. Then **quit WeChat** (⌘Q).
+3. **Make the debuggable copy.** `scripts/make_debug_wechat.sh` clones WeChat.app to
+   `~/Applications/WeChat-debug.app` and ad-hoc re-signs it with `get-task-allow` and without hardened
+   runtime, so lldb and Frida may attach. The copy has the same bundle id, so it shares the login and
+   data of the original. Use only the copy from now on; rerun the script after every WeChat update.
+4. **Capture the database key.** Start the hook first (it waits for WeChat to start), then launch the copy
+   from a second terminal:
+   ```bash
+   mkdir -p -m 700 secrets
+   lldb -o "command script import tools/hook_cc.py" -o "hookwait 180 $PWD/secrets/captures.tsv" -o quit
+   ```
+   ```bash
+   open ~/Applications/WeChat-debug.app
+   ```
+   No sudo is needed; macOS may ask once to allow Developer Tools access. Open a few chats while it runs.
+   It stops by itself once the account passphrase (the 256000-round PBKDF call SQLCipher makes when it
+   opens a database) has been seen, and leaves WeChat running.
+5. **Verify and store the keys**, then delete the raw captures:
+   ```bash
+   ACC=$(ls -d ~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/wxid_*/ | head -1)
+   uv run tools/verify_keys.py --account-dir "$ACC" --captures secrets/captures.tsv --out secrets/wechat_keys.json
+   rm secrets/captures.tsv
+   uv run tools/derive_image_key.py
+   ```
+   `verify_keys.py` must print `raw key: found`; otherwise quit WeChat and repeat step 4 (the passphrase
+   only shows up while WeChat starts). The terminal may ask for access to other apps' data: allow it.
+6. **API keys and config.**
+   ```bash
+   cp examples/stt_keys.toml secrets/stt_keys.toml && chmod 600 secrets/stt_keys.toml
+   cp examples/config.local.toml config.local.toml
+   uv run monitor.py chats            # usernames of your chats; put them in config.local.toml
+   ```
+   The defaults need OpenAI, DeepSeek and Volcengine keys (`examples/stt_keys.toml` explains each).
+7. **Try it in the foreground.** With WeChat-debug running, start a dry run and send any text by hand
+   from WeChat-debug (the sender's seed, needed once per WeChat launch):
+   ```bash
+   uv run monitor.py run --dry-run    # logs replies instead of sending them
+   ```
+   Drop `--dry-run` to really send.
+8. **Run it in the background.** `scripts/install.sh` builds `~/Library/Application Support/wechat-monitor/
+   WeChat Monitor.app` and loads it as a LaunchAgent. Add that app under System Settings → Privacy &
+   Security → Full Disk Access (⌘⇧G to type the path) and allow its "access data from other apps"
+   prompt; run `scripts/install.sh` again to restart it. Log: `data/monitor.log`.
+
+### Other WeChat versions
+
+After an update, rerun steps 3–5 (and the key is re-captured the same way after a re-login). Reading,
+transcription and LLM replies keep working as long as the database layout holds. Sending stops: the
+sender refuses a `wechat.dylib` whose UUID differs from `EXPECTED_UUID` in `wxbot/sender/agent.js`. Porting it
+means finding the same functions in the new build (the `offsets` table in `agent.js`; upstream ships
+tables per version in `hook/versions/` of
+[WeChat-ChatBot-Mac](https://github.com/Gusion1017/WeChat-ChatBot-Mac)) and updating the UUID
+(the arm64 line of `dwarfdump --uuid ~/Applications/WeChat-debug.app/Contents/Resources/wechat.dylib`,
+lower case without dashes). Until then, keep the
+supported build installed and turn off WeChat's automatic updates.
+
 ## Reply bot (`wxbot/`, run by `monitor.py`)
 
 A resident LaunchAgent that answers the chats in `config.toml` (your own chats, location and prompts go
@@ -113,26 +187,15 @@ Labeling for fine-tuning a local Wu model: `uv run stt/label.py serve` (see `stt
 
 ## Keys (`secrets/wechat_keys.json`, mode 600 — never commit or share)
 
-- `raw_key`: the account's SQLCipher passphrase (PBKDF2-SHA512, 256000 rounds) — opens every DB,
-  including ones created later (`wxcrypto.key_for_db` derives and caches).
+- `raw_key`: the account's SQLCipher passphrase (PBKDF2-SHA512, 256000 rounds; `kdf` holds the
+  parameters) — opens every DB, including ones created later (`wxcrypto.key_for_db` derives and caches).
 - `databases`: per-DB page keys, verified by page-1 HMAC.
 - `image`: V2 `.dat` key, derived offline (`aes = md5(uin + wxid)[:16]`, `xor = uin & 0xff`).
 
-## Re-capturing the DB key (only if it stops working, e.g. after re-login)
+## Re-capturing the DB key (only if it stops working, e.g. after re-login or a WeChat update)
 
-1. Quit WeChat. `~/Applications/WeChat-debug.app` is an APFS clone of WeChat.app, ad-hoc
-   re-signed with `get-task-allow` and without hardened runtime. If WeChat updated, rebuild it:
-   `cp -cR /Applications/WeChat.app ~/Applications/WeChat-debug.app`, then
-   `codesign --force --sign - --entitlements ent.plist ~/Applications/WeChat-debug.app`
-   (`ent.plist` = original entitlements minus `com.apple.application-identifier`, plus
-   `com.apple.security.get-task-allow`).
-2. Start the hook, then launch the copy (no sudo needed):
-   `lldb -o "command script import tools/hook_cc.py" -o "hookwait 180 $PWD/secrets/captures.tsv" -o quit`
-   and `open ~/Applications/WeChat-debug.app`. It stops on its own after the raw key shows up.
-3. `python3 tools/verify_keys.py --account-dir <xwechat_files/wxid_…> --captures secrets/captures.tsv --out secrets/wechat_keys.json`
-   (store `raw_key` too), delete `captures.tsv`, quit the copy, reopen `/Applications/WeChat.app`.
-
-`uv run tools/derive_image_key.py` re-derives the image key.
+Quit WeChat, then steps 3–5 of "Setup on a new Mac": rebuild the debug copy if WeChat updated, run the
+lldb hook while the copy starts, `verify_keys.py` (keeps keys already in the file), `derive_image_key.py`.
 
 ## Formats
 

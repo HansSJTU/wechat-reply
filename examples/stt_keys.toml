@@ -1,0 +1,22 @@
+# Copy to secrets/stt_keys.toml (chmod 600; secrets/ is gitignored) and fill in what you have.
+# Environment variables with the same names in upper case (see stt/keys.py) take precedence.
+
+# Needed for the defaults: [stt] provider = "combo" (Volcengine + DeepSeek + OpenAI, merged by
+# DeepSeek) and the [llm] chat bot (OpenAI).
+openai_api_key = ""
+deepseek_api_key = ""
+volc_api_key = ""            # new Volcengine console: the single "API Key" (not "Secret Key")
+# volc_app_id = ""           # classic console instead: App ID + Access Token
+# volc_access_token = ""
+
+# Optional, only for the other providers in stt/README.md
+# dashscope_api_key = ""     # Alibaba (ali-*)
+# aliyun_workspace_id = ""
+# tencent_secret_id = ""     # Tencent (tencent-*)
+# tencent_secret_key = ""
+# tencent_app_id = ""
+# xf_app_id = ""             # iFlytek (xf-*)
+# xf_api_key = ""
+# xf_api_secret = ""
+# siliconflow_api_key = ""   # SiliconFlow (sf-*)
+# gemini_api_key = ""        # Google (gemini-*)
