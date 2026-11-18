@@ -246,8 +246,26 @@ def normalize(text: str) -> str:
     return PUNCT.sub("", text)
 
 
+def cut_wav(src: str, dst: str, start: float, end: float) -> float:
+    """Copy [start, end) seconds of a PCM wav to dst; returns the kept length in seconds."""
+    import wave
+    with wave.open(src, "rb") as w:
+        rate, n = w.getframerate(), w.getnframes()
+        a, b = max(0, int(start * rate)), min(n, int(end * rate))
+        w.setpos(a)
+        frames = w.readframes(max(0, b - a))
+        params = w.getparams()
+    with wave.open(dst + ".tmp", "wb") as o:
+        o.setparams(params)
+        o.writeframes(frames)
+    os.replace(dst + ".tmp", dst)
+    return (b - a) / rate
+
+
 def export() -> dict:
+    """Clips with a trim (首尾空白 cut on the page) are written trimmed to wenet/wav/; others point at the original."""
     os.makedirs(EXPORT_DIR, exist_ok=True)
+    os.makedirs(os.path.join(EXPORT_DIR, "wav"), exist_ok=True)
     lab, voc = labels(), vocab()
     by_key = {v["key"]: v for v in voices()}
     counts = {"train": [0, 0.0], "test": [0, 0.0]}
@@ -260,10 +278,14 @@ def export() -> dict:
             continue
         oov |= {c for c in txt if voc and c not in voc}
         s = v["split"]
-        files[s].write(json.dumps({"key": key.removesuffix(".wav"), "wav": v["wav"], "txt": txt},
+        wav, sec = v["wav"], v["seconds"]
+        if r.get("trim"):
+            wav = os.path.join(EXPORT_DIR, "wav", key)
+            sec = cut_wav(v["wav"], wav, *r["trim"])
+        files[s].write(json.dumps({"key": key.removesuffix(".wav"), "wav": wav, "txt": txt},
                                   ensure_ascii=False) + "\n")
         counts[s][0] += 1
-        counts[s][1] += v["seconds"]
+        counts[s][1] += sec
     for f in files.values():
         f.close()
     return {"dir": EXPORT_DIR, **{s: {"clips": n, "minutes": round(sec / 60, 1)} for s, (n, sec) in counts.items()},
@@ -276,9 +298,11 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _send(self, code, body: bytes, ctype: str):
+    def _send(self, code, body: bytes, ctype: str, headers: dict | None = None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -306,7 +330,17 @@ class Handler(BaseHTTPRequestHandler):
             v = next((v for v in voices() if v["key"] == key), None)  # only files listed in messages.jsonl
             if not v:
                 return self._send(404, b"not found", "text/plain")
-            self._send(200, open(v["wav"], "rb").read(), "audio/wav")
+            data = open(v["wav"], "rb").read()
+            # Range support: without it the browser can't seek (playing from a point on the waveform)
+            m = re.fullmatch(r"bytes=(\d*)-(\d*)", self.headers.get("Range", "").strip())
+            if m and (m[1] or m[2]):
+                a, b = (int(m[1]), int(m[2] or len(data) - 1)) if m[1] else (max(0, len(data) - int(m[2])), len(data) - 1)
+                b = min(b, len(data) - 1)
+                if a > b:
+                    return self._send(416, b"", "audio/wav", {"Content-Range": f"bytes */{len(data)}"})
+                return self._send(206, data[a:b + 1], "audio/wav",
+                                  {"Content-Range": f"bytes {a}-{b}/{len(data)}", "Accept-Ranges": "bytes"})
+            self._send(200, data, "audio/wav", {"Accept-Ranges": "bytes"})
         else:
             self._send(404, b"not found", "text/plain")
 
@@ -330,6 +364,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "bad request"}, 400)
         rec = {"key": r["key"], "wu": r.get("wu", "").strip(), "meaning": r.get("meaning", "").strip(),
                "status": r["status"], "split": split_of(r["key"]), "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+        t = r.get("trim")
+        if (isinstance(t, list) and len(t) == 2 and all(isinstance(x, (int, float)) for x in t)
+                and 0 <= t[0] < t[1]):
+            rec["trim"] = [round(t[0], 3), round(t[1], 3)]
         os.makedirs(LABEL_DIR, exist_ok=True)
         with open(LABELS, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")

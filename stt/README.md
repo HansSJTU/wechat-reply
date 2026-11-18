@@ -236,6 +236,11 @@ uv run stt/label.py export    # data/labels/wenet/{train,test}.jsonl, {"key","wa
   (they can't be learned without growing the vocabulary).
 - Files: `data/labels/drafts.json`, `data/labels/labels.jsonl` (append-only; last line per clip wins;
   status done/skip/bad/exclude). Export strips punctuation and lists out-of-vocabulary characters.
+- **首尾空白** (waveform under the player): “去掉首尾空白” finds the first and last stretch of speech
+  (louder than -30 dB of the peak and 3× the noise floor) and keeps it plus 0.25 s on each side; or drag
+  on the waveform to choose the part to keep; click to play from there. The range is saved with the
+  label (`"trim": [start, end]` seconds); replay plays only that part, and export writes the cut clip
+  to `wenet/wav/` instead of pointing at the original. The original audio is never changed.
 - **不使用 (exclude)**: keeps the transcript but puts the clip in neither train nor test (private content,
   test messages to the bot, …). Only `done` clips are exported; change a clip's status any time.
 - **我听到的 → 转换** (above the transcript): type what you heard, mixing Wu characters, Mandarin and

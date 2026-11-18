@@ -82,6 +82,12 @@ kbd { font: 11px ui-monospace, Menlo, monospace; border: 1px solid var(--line); 
 .gwarn button, .tools button { border: 1px solid var(--line); background: var(--panel); color: var(--ink);
   border-radius: 5px; padding: 1px 8px; cursor: pointer; font-size: 12px; }
 .tools { margin-top: 6px; display: flex; gap: 8px; }
+.wave canvas { width: 100%; height: 64px; display: block; margin-top: 6px; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--panel); cursor: crosshair; touch-action: none; }
+.trim { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px; font-size: 13px; color: var(--muted); }
+.trim button { border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  border-radius: 5px; padding: 1px 8px; cursor: pointer; font-size: 12px; }
+.trim .unsaved { color: var(--warn); }
 .rough { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .rough input[type=text] { flex: 1; min-width: 220px; }
 .rough button { border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink); border-radius: 6px;
@@ -176,7 +182,7 @@ function visible() {
 
 function renderProgress() {
   const done = items.filter(i => status(i) === "done");
-  const sum = s => done.filter(i => i.split === s).reduce((a, i) => a + i.seconds, 0) / 60;
+  const sum = s => done.filter(i => i.split === s).reduce((a, i) => a + (i.label?.trim ? i.label.trim[1] - i.label.trim[0] : i.seconds), 0) / 60;
   const tr = sum("train"), te = sum("test");
   $("#prog").textContent = `已标注 ${done.length}/${items.length} 条 · 训练 ${tr.toFixed(1)} 分钟 · 测试 ${te.toFixed(1)} 分钟 · 目标 ${TARGET_MIN} 分钟`;
   $("#barfill").style.width = Math.min(100, (tr + te) / TARGET_MIN * 100) + "%";
@@ -204,6 +210,9 @@ function select(key) {
       ${it.split === "test" ? '<span class="tag">测试集：只用来评估，不参与训练</span>' : ""}
       ${lab.status ? `<span class="saved">已保存（${{done: "完成", skip: "跳过", bad: "坏音频", exclude: "不使用：不进训练集也不进测试集"}[lab.status]}）</span>` : ""}</div>
     <audio id="au" controls autoplay src="/audio/${encodeURIComponent(it.key)}"></audio>
+    <div class="wave"><canvas id="wave"></canvas></div>
+    <div class="trim"><button id="autoTrim">去掉首尾空白</button><button id="clearTrim">不裁剪</button>
+      <span id="trimInfo"></span><span>· 在波形上拖动选出要保留的部分，点一下从那里播放</span></div>
     <label class="f">模型草稿（点“用这个”填进下面）</label>
     ${drafters.map((d, n) => `<div class="draft"><span class="src">${esc(d)}</span>
       <span class="txt">${esc(it.drafts[d] ?? "（生成中…）")}</span>
@@ -260,7 +269,7 @@ function select(key) {
   $("#withAudio").onchange = e => { withAudio = e.target.checked; };
   $("#model").onchange = e => { model = e.target.value; try { localStorage.setItem("convertModel", model); } catch {} syncAudioOpt(); };
   syncAudioOpt();
-  checkOov(); checkGloss(); renderChips(); renderConv();
+  checkOov(); checkGloss(); renderChips(); renderConv(); setupWave(key);
   const ta = $("#wu"); ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
   renderList();
 }
@@ -401,16 +410,101 @@ $("#gsave").onclick = saveGloss;
 fetch("/api/glossary").then(r => r.json()).then(r => { gloss = r.entries;
   $("#glossBtn").textContent = `说法表（${gloss.length}）`; checkGloss(); renderChips(); });
 
-function replay() { const a = $("#au"); if (a) { a.currentTime = 0; a.play(); } }
+function replay() { const a = $("#au"); if (a) { a.currentTime = trimOf(sel)?.[0] ?? 0; a.play(); } }
+
+// ---- 首尾空白: waveform, trim range to keep (saved with the label, applied on export)
+const trims = {};  // key -> [start, end] | null, edits not saved yet
+const waves = {};  // key -> {dur, rms (per 10 ms)}
+const trimOf = key => key in trims ? trims[key] : (items.find(i => i.key === key)?.label?.trim ?? null);
+const sameTrim = (a, b) => (!a && !b) || (a && b && Math.abs(a[0] - b[0]) < 1e-3 && Math.abs(a[1] - b[1]) < 1e-3);
+
+async function loadWave(key) {
+  if (waves[key]) return waves[key];
+  const buf = await fetch(`/audio/${encodeURIComponent(key)}`).then(r => r.arrayBuffer());
+  const ab = await new OfflineAudioContext(1, 1, 16000).decodeAudioData(buf);
+  const ch = ab.getChannelData(0), hop = Math.round(ab.sampleRate * 0.01);
+  const rms = new Float32Array(Math.ceil(ch.length / hop));
+  for (let i = 0; i < rms.length; i++) {
+    let sum = 0; const a = i * hop, b = Math.min(ch.length, a + hop);
+    for (let j = a; j < b; j++) sum += ch[j] * ch[j];
+    rms[i] = Math.sqrt(sum / Math.max(1, b - a));
+  }
+  return waves[key] = {dur: ab.duration, rms};
+}
+
+// First/last 30 ms run louder than both -30 dB of the peak and 3× the noise floor, plus 0.25 s each side.
+function autoTrim(w) {
+  const r = w.rms, peak = Math.max(...r), noise = [...r].sort((a, b) => a - b)[Math.floor(r.length * 0.1)] || 0;
+  const thr = Math.max(peak * 0.0316, noise * 3), loud = i => r[i] > thr && r[i + 1] > thr && r[i + 2] > thr;
+  let a = 0; while (a < r.length - 3 && !loud(a)) a++;
+  let b = r.length - 3; while (b > a && !loud(b)) b--;
+  const s = Math.max(0, a * 0.01 - 0.25), e = Math.min(w.dur, (b + 3) * 0.01 + 0.25);
+  return s < 0.1 && w.dur - e < 0.1 ? null : [+s.toFixed(2), +e.toFixed(2)];
+}
+
+function drawWave() {
+  const cv = $("#wave"), w = waves[sel]; if (!cv || !w) return;
+  const dpr = window.devicePixelRatio || 1, W = cv.width = cv.clientWidth * dpr, H = cv.height = cv.clientHeight * dpr;
+  const g = cv.getContext("2d"), css = getComputedStyle(document.documentElement), col = n => css.getPropertyValue(n).trim();
+  const t = trimOf(sel), peak = Math.max(...w.rms) || 1, per = w.rms.length / W;
+  for (let x = 0; x < W; x++) {
+    let m = 0; for (let i = Math.floor(x * per); i < Math.max(Math.floor(x * per) + 1, Math.floor((x + 1) * per)); i++) m = Math.max(m, w.rms[i] || 0);
+    const sec = x / W * w.dur, h = Math.max(1, Math.sqrt(m / peak) * (H - 6));
+    g.fillStyle = !t || (sec >= t[0] && sec <= t[1]) ? col("--accent") : col("--line");
+    g.fillRect(x, (H - h) / 2, 1, h);
+  }
+  if (t) {  // shade what gets cut
+    g.fillStyle = col("--muted"); g.globalAlpha = .12;
+    g.fillRect(0, 0, t[0] / w.dur * W, H); g.fillRect(t[1] / w.dur * W, 0, W, H); g.globalAlpha = 1;
+  }
+  const au = $("#au");
+  if (au) { g.fillStyle = col("--ink"); g.fillRect(au.currentTime / w.dur * W, 0, Math.max(1, dpr), H); }
+}
+
+function renderTrimInfo() {
+  const el = $("#trimInfo"), w = waves[sel]; if (!el || !w) return;
+  const t = trimOf(sel), saved = items.find(i => i.key === sel)?.label?.trim ?? null;
+  el.innerHTML = (t ? `保留 ${t[0].toFixed(2)}–${t[1].toFixed(2)} 秒，去掉 ${(w.dur - (t[1] - t[0])).toFixed(1)} 秒`
+                    : `不裁剪（${w.dur.toFixed(1)} 秒）`) + (sameTrim(t, saved) ? "" : ' <span class="unsaved">· 保存后生效</span>');
+}
+
+function setTrim(t) { trims[sel] = t; drawWave(); renderTrimInfo(); }
+
+async function setupWave(key) {
+  const au = $("#au"), cv = $("#wave");
+  let startedAt = 0;
+  au.onloadedmetadata = () => { const t = trimOf(key); if (t && au.currentTime < t[0]) au.currentTime = t[0]; };
+  const stopAtEnd = () => { const t = trimOf(key); if (t && startedAt < t[1] && au.currentTime >= t[1]) au.pause(); };
+  au.onplay = () => {  // check every frame: timeupdate alone overshoots the trim end by up to ~0.25 s
+    startedAt = au.currentTime;
+    const tick = () => { stopAtEnd(); drawWave(); if (!au.paused && sel === key) requestAnimationFrame(tick); }; tick();
+  };
+  au.ontimeupdate = stopAtEnd;
+  au.onseeked = drawWave;
+  $("#autoTrim").onclick = () => waves[key] && setTrim(autoTrim(waves[key]));
+  $("#clearTrim").onclick = () => setTrim(null);
+  let x0 = null, moved = false;
+  const at = e => { const r = cv.getBoundingClientRect(); return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * (waves[key]?.dur ?? 0); };
+  cv.onpointerdown = e => { if (!waves[key]) return; x0 = e.clientX; moved = false; cv.setPointerCapture(e.pointerId); cv.dataset.t0 = at(e); };
+  cv.onpointermove = e => {
+    if (x0 === null || Math.abs(e.clientX - x0) < 4) return;
+    moved = true; const a = +cv.dataset.t0, b = at(e);
+    setTrim([+Math.min(a, b).toFixed(2), +Math.max(a, b).toFixed(2)]);
+  };
+  cv.onpointerup = e => { if (x0 !== null && !moved) { au.currentTime = at(e); au.play(); } x0 = null; };
+  try { await loadWave(key); } catch { $("#trimInfo").textContent = "波形加载失败"; return; }
+  if (sel === key) { drawWave(); renderTrimInfo(); }
+}
+window.addEventListener("resize", drawWave);
 
 async function save(st) {
   const wu = $("#wu").value.trim();
   if (st === "done" && !wu) { $("#wu").focus(); return; }
   const r = await fetch("/api/label", {method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({key: sel, wu, meaning: $("#meaning").value, status: st})}).then(r => r.json());
+    body: JSON.stringify({key: sel, wu, meaning: $("#meaning").value, status: st, trim: trimOf(sel)})}).then(r => r.json());
   if (!r.ok) { alert("保存失败"); return; }
   const before = visible(), idx = before.findIndex(i => i.key === sel);
-  const it = items.find(i => i.key === sel); it.label = r.label;
+  const it = items.find(i => i.key === sel); it.label = r.label; delete trims[sel];
   renderProgress();
   // the clip right below this one that is still in the list (in 待标注 the saved one drops out);
   // only when there is none below, wrap to the top
