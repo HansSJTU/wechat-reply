@@ -22,7 +22,8 @@ import zstandard
 from .livedb import LiveDB
 from .log import log
 from .paths import DATA, ROOT
-from .wxcrypto import decrypt_image, image_kind, key_for_db
+from .sender import Refused
+from .wxcrypto import decrypt_image, image_kind, key_for_db, wxgf_to_jpeg
 
 DOCS = os.path.expanduser("~/Library/Containers/com.tencent.xinWeChat/Data/Documents")
 TYPES = {1: "text", 3: "image", 34: "voice", 42: "card", 43: "video", 47: "emoji", 48: "location",
@@ -40,6 +41,14 @@ def account_dir():
 def load_keys():
     with open(os.path.join(ROOT, "secrets", "wechat_keys.json")) as f:
         return json.load(f)
+
+
+def wait_for(path, seconds):
+    """Bounded wait for a file WeChat is about to write (not a resident poll)."""
+    end = time.time() + seconds
+    while not os.path.exists(path) and time.time() < end:
+        time.sleep(0.1)
+    return os.path.exists(path)
 
 
 def text_of(content, ct_flag):
@@ -85,8 +94,10 @@ class Contacts:
 class Source:
     """kqueue-driven reader. `on_message(ev)` runs on one worker thread, in arrival order."""
 
-    def __init__(self, cfg, store, on_message, on_wake=lambda: None):
+    def __init__(self, cfg, store, on_message, on_wake=lambda: None, fetch_image=None):
+        """fetch_image(me, cdn_url, aes_key, timeout) -> bytes | None: full-size image via WeChat."""
         self.cfg, self.store, self.on_message, self.on_wake = cfg, store, on_message, on_wake
+        self.fetch_image = fetch_image
         self.acc = account_dir()
         self.keys = load_keys()
         self.me = re.sub(r"_[0-9a-f]{4}$", "", os.path.basename(self.acc.rstrip("/")))
@@ -197,7 +208,7 @@ class Source:
             if ev["is_group"] and base == 1:
                 ev["mentions_me"] = self.mentions_me(text, text_of(src, src_flag))
         elif base == 3:
-            ev.update(self.image(chat, ctime, local_id, packed))
+            ev.update(self.image(chat, ctime, local_id, packed, text))
         elif base == 34:
             ev.update(self.voice(chat, server_id, local_id, text))
         elif base == 49:
@@ -217,29 +228,78 @@ class Source:
         nick = (self.contacts.by_user.get(self.me) or {}).get("nick")
         return bool(nick) and f"@{nick}" in text
 
-    def image(self, chat, ctime, local_id, packed):
+    def image(self, chat, ctime, local_id, packed, xml):
         m = re.search(rb"[0-9a-f]{32}", packed or b"")
         if not m:
             return {"image_error": "no file id in message"}
         md5 = m.group(0).decode()
+        media = self.cfg.get("media", {})
         month = datetime.datetime.fromtimestamp(ctime).strftime("%Y-%m")
         d = os.path.join(self.acc, "msg", "attach", hashlib.md5(chat.encode()).hexdigest(), month, "Img")
-        # Bounded wait for WeChat to finish downloading the full-size file (not a resident poll).
-        wait_until = time.time() + float(self.cfg.get("media", {}).get("image_wait_seconds", 3))
-        while True:
-            full = [p for p in (f"{d}/{md5}.dat", f"{d}/{md5}_h.dat") if os.path.exists(p)]
+        # WeChat itself only downloads the full size when the image is opened in the client.
+        wait_until = time.time() + float(media.get("image_wait_seconds", 0))
+        while True:  # optional bounded wait for that (not a resident poll)
+            full = [p for p in (f"{d}/{md5}_h.dat", f"{d}/{md5}.dat") if os.path.exists(p)]
             if full or time.time() >= wait_until:
                 break
             time.sleep(0.2)
-        cands = full or [p for p in (f"{d}/{md5}_t.dat",) if os.path.exists(p)]
-        if not cands:
-            return {"image_error": "file not downloaded yet", "image_id": md5}
-        img = decrypt_image(open(cands[0], "rb").read(), self.img_key, self.img_xor)
+        img, origin = None, None
+        thumb = f"{d}/{md5}_t.dat"
+        if full:
+            img, origin = decrypt_image(open(full[0], "rb").read(), self.img_key, self.img_xor), "local"
+        elif self.should_fetch(chat, ctime):
+            # The message row lands before the client has downloaded the thumbnail, and a request for
+            # the same image while that runs is refused (-20003): let the thumbnail arrive first.
+            wait_for(thumb, 5)
+            img = self.fetch_full(local_id, xml, float(media.get("fetch_timeout_seconds", 10)))
+            origin = img and "cdn"
+            full = [] if img else [p for p in (f"{d}/{md5}_h.dat", f"{d}/{md5}.dat") if os.path.exists(p)]
+            if full:  # meanwhile the client fetched it itself (chat open)
+                img, origin = decrypt_image(open(full[0], "rb").read(), self.img_key, self.img_xor), "local"
+        if img is None:
+            if not wait_for(thumb, 3):
+                return {"image_error": "file not downloaded yet", "image_id": md5}
+            img, origin = decrypt_image(open(thumb, "rb").read(), self.img_key, self.img_xor), "thumbnail"
+        if image_kind(img) == "wxgf":  # WeChat's own HEVC container: the LLM needs JPEG
+            img = wxgf_to_jpeg(img) or img
         kind = image_kind(img) or "bin"
         out = os.path.join(DATA, "media", f"{local_id}_{md5}.{kind}")
         with open(out, "wb") as f:
             f.write(img)
-        return {"image_path": out, "image_is_thumbnail": not full, "image_format": kind}
+        return {"image_path": out, "image_is_thumbnail": origin == "thumbnail", "image_origin": origin,
+                "image_format": kind}
+
+    def should_fetch(self, chat, ctime):
+        """Fetch full size only for chats that can be answered, and not for old backlog."""
+        return (self.fetch_image is not None and self.cfg.get("media", {}).get("fetch_full", True)
+                and self.mode.get(chat) in ("always", "mention")
+                and time.time() - ctime <= float(self.cfg.get("reply", {}).get("max_age_seconds", 600)))
+
+    def fetch_full(self, local_id, xml, timeout):
+        attr = lambda name: (re.search(rf'\b{name}="([0-9a-fA-F]+)"', xml or "") or [None, None])[1]
+        url, key = attr("cdnmidimgurl"), attr("aeskey")
+        if not (url and key):
+            return None
+        t0 = time.monotonic()
+        deadline = t0 + timeout
+        while True:
+            try:
+                img = self.fetch_image(self.me, url.lower(), key.lower(), max(1.0, deadline - time.monotonic()))
+                break
+            except Refused as e:  # usually the client is still fetching this image itself
+                if time.monotonic() + 1 >= deadline:
+                    log(f"image {local_id}: full size not fetched ({e})")
+                    return None
+                time.sleep(1)
+            except Exception as e:  # WeChat-debug not running, ...
+                log(f"image {local_id}: full size not fetched ({type(e).__name__}: {e})")
+                return None
+        ms = int((time.monotonic() - t0) * 1000)
+        if not img or not image_kind(img):
+            log(f"image {local_id}: full size not fetched within {timeout:g}s")
+            return None
+        log(f"image {local_id}: full size fetched ({len(img) // 1024} KB, {ms} ms)")
+        return img
 
     def voice(self, chat, server_id, local_id, xml):
         dur = re.search(r'voicelength="(\d+)"', xml)

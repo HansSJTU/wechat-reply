@@ -2,10 +2,14 @@
 
 - SQLCipher 4 databases (AES-256-CBC, HMAC-SHA512, 4096-byte pages, 80 reserved),
   including pages still sitting in the -wal file.
-- V2 image .dat files (AES-128-ECB head + plain middle + XOR tail).
+- V2 image .dat files (AES-128-ECB head + plain middle + XOR tail), and the HEVC "wxgf"
+  pictures inside them.
 """
 import os
+import re
+import shutil
 import struct
+import subprocess
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -117,6 +121,26 @@ def image_kind(head: bytes):
 def aes_ecb_decrypt(key: bytes, data: bytes) -> bytes:
     dec = Cipher(algorithms.AES(key), modes.ECB()).decryptor()
     return dec.update(data) + dec.finalize()
+
+
+def wxgf_to_jpeg(data: bytes) -> bytes | None:
+    """WeChat's own HEVC image container ("wxgf") -> JPEG via ffmpeg, or None.
+
+    After the header come one or two raw HEVC streams, each starting at a VPS NAL unit; with
+    two, the small one is the alpha mask and the larger one the picture.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg or not data.startswith(b"wxgf") or len(data) < 8:
+        return None
+    vps = [m.start() for m in re.finditer(rb"\x00\x00\x00\x01\x40\x01", data[data[4]:])]
+    if not vps:
+        return None
+    bounds = list(zip(vps, vps[1:] + [len(data) - data[4]]))
+    s, e = max(bounds, key=lambda b: b[1] - b[0])
+    r = subprocess.run([ffmpeg, "-nostdin", "-loglevel", "error", "-f", "hevc", "-i", "-",
+                        "-frames:v", "1", "-q:v", "2", "-f", "image2", "-c:v", "mjpeg", "-"],
+                       input=data[data[4]:][s:e], capture_output=True, timeout=30)
+    return r.stdout if r.returncode == 0 and r.stdout.startswith(b"\xff\xd8") else None
 
 
 def decrypt_image(data: bytes, aes_key: bytes, xor_key: int):

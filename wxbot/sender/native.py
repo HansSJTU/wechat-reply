@@ -6,6 +6,7 @@ detach; nothing polls the process). Sending needs a seed: the agent clones one f
 WeChat itself sends, so after each WeChat launch one manual text send is required.
 """
 import json
+import os
 import secrets
 import subprocess
 import threading
@@ -18,10 +19,15 @@ from ..log import log
 
 AGENT = Path(__file__).with_name("agent.js")
 DEBUG_EXECUTABLE = str(Path.home() / "Applications/WeChat-debug.app/Contents/MacOS/WeChat")
+WECHAT_TMP = Path.home() / "Library/Containers/com.tencent.xinWeChat/Data/tmp"  # WeChat may write here
 
 
 class NotReady(RuntimeError):
     """No usable send context yet; the message was not submitted."""
+
+
+class Refused(RuntimeError):
+    """WeChat would not start a download; -20003 while the same image is being fetched already."""
 
 
 def _varint(v: int) -> bytes:
@@ -142,6 +148,39 @@ class NativeSender:
                     raise NotReady(str(e)) from e
                 raise
         return {"clientMessageId": msg_id, **r}
+
+    # ---- media -----------------------------------------------------------------
+    def download_image(self, me: str, cdn_url: str, aes_key: str, timeout: float = 10.0) -> bytes | None:
+        """Have WeChat fetch a received image's full size (the `cdnmidimgurl` of its <img>).
+
+        WeChat writes the decrypted image to a file in its own container; returns its bytes, or
+        None if nothing complete arrived within `timeout`. Raises NotReady without WeChat-debug,
+        Refused when WeChat refuses the request (-20003: the same image was requested a
+        moment ago, e.g. by the client itself while the chat is open).
+        """
+        self.ensure()
+        path = str(WECHAT_TMP / f"wxbot_img_{secrets.token_hex(8)}")
+        with self.lock:
+            if self.script is None:
+                raise NotReady("WeChat-debug went away")
+            r = self.script.exports_sync.download(me, cdn_url, aes_key, 2, path)
+        if r["result"]:
+            raise Refused(f"WeChat refused the download ({r['result'] - (1 << 32) if r['result'] >= 1 << 31 else r['result']})")
+        deadline, last = time.monotonic() + timeout, -1
+        try:
+            while time.monotonic() < deadline:  # bounded wait for this one download
+                time.sleep(0.25)
+                size = os.path.getsize(path) if os.path.exists(path) else -1
+                if size > 0 and size == last:   # unchanged for one interval: written
+                    return Path(path).read_bytes()
+                last = size
+            return None
+        finally:
+            # WeChat may still be writing after a timeout; remove what is there now and later
+            Path(path).unlink(missing_ok=True)
+            late = threading.Timer(60, lambda: Path(path).unlink(missing_ok=True))
+            late.daemon = True
+            late.start()
 
 
 def main():

@@ -40,7 +40,7 @@ def run(cfg, dry_run):
     pipeline = None
     sender = NativeSender(on_event=lambda ev: pipeline and pipeline.on_sender_event(ev))
     pipeline = Pipeline(cfg, store, sender, dry_run=dry_run)
-    source = Source(cfg, store, pipeline.on_message, pipeline.on_wake)
+    source = Source(cfg, store, pipeline.on_message, pipeline.on_wake, fetch_image=sender.download_image)
     def stop(*_):  # launchd and the launcher may both deliver SIGTERM; act on the first only
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         # Watchdog: before this, a stopped bot outlived its launcher (a leftover thread kept the

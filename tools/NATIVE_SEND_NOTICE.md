@@ -16,6 +16,11 @@ protobuf encoding, bounded context wait, private result JSON, and safe callback
 lifetime handling. No upstream application UI, AI service, installer, server,
 or automatic reply workflow is included.
 
+The image download (`download()` in `agent.js`: the StartDownloadMedia request layout and the
+CdnManager lookup) is adapted from the same commit's `hook/script.js` (`triggerDownload`,
+`resolveCdnManager`); unlike upstream it lets WeChat write the decrypted file instead of
+capturing CDN chunks.
+
 The address table comes from `hook/versions/4_2_0_12_mac.json` in the same
 upstream commit. Preserve this notice and `LICENSE.native-send` when
 redistributing this implementation.

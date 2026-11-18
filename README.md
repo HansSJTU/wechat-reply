@@ -29,8 +29,10 @@ own internal send path.
    `Msg_<md5(chat)>` tables become events (zstd-decompressed content, parsed XML for app messages).
 2. **Understand.** Text is used as is. Voice is SILK in `media_0.db`, decoded to wav and sent to
    speech-to-text: `combo` asks several engines in parallel and lets an LLM merge their guesses,
-   which is what makes dialect speech readable (`stt/README.md`). Images are decrypted from
-   WeChat's `.dat` files (AES head + XOR tail) and attached to the LLM call.
+   which is what makes dialect speech readable (`stt/README.md`). Images: the client itself only
+   downloads the full size when one is opened, so the Frida agent starts that same CDN download
+   (WeChat writes the decrypted JPEG to a file we name); otherwise the `.dat` files are decrypted
+   (AES head + XOR tail, HEVC `wxgf` converted to JPEG with ffmpeg) and attached to the LLM call.
 3. **Reply.** One thread per chat waits for a burst of messages to end (`debounce_seconds`),
    sends the last few hours of the conversation to the LLM, and gets one short reply. Rate limits,
    a stop file and per-group mute keep it in check.
@@ -166,8 +168,13 @@ scripts/install.sh                       # (re)start the LaunchAgent; log: data/
 ```
 
 Run the debug copy (not `/Applications/WeChat.app`), logged in, and send any text from it once.
-Images: the desktop client downloads the full image only when it is opened, so the LLM usually
-gets the thumbnail; WeChat's `wxgf` format is not viewable and is passed as text.
+Images: the desktop client downloads the full image only when it is opened. For chats that can be
+answered, the bot has WeChat-debug fetch it right away (`[media] fetch_full`, about 1 s; no seed
+needed) and falls back to the thumbnail after `fetch_timeout_seconds`. WeChat answers -20003 while
+the same image is being fetched already, which is the client's own thumbnail download for a moment
+after the message row lands: the bot waits for the thumbnail first and retries on -20003, and uses
+the client's full-size copy if one appears. WeChat's HEVC `wxgf` images are converted to JPEG with
+ffmpeg (`brew install ffmpeg`).
 
 The native sender is GPL-3.0-or-later; see `tools/NATIVE_SEND_NOTICE.md`.
 
@@ -210,6 +217,9 @@ lldb hook while the copy starts, `verify_keys.py` (keeps keys already in the fil
   (`WCDB_CT_message_content = 4`). Types: 1 text, 3 image, 34 voice, 43 video, 47 emoji, 49 app/link/file.
 - Voice: `media_0.db` → `VoiceInfo.voice_data`, `0x02` + SILK v3 (strip first byte, decode with `pilk`, 24 kHz).
 - Images: `msg/attach/<md5(chat)>/<YYYY-MM>/Img/<md5>[_t|_h].dat`; full-size only after download.
+  The decrypted full size is usually `wxgf`: a header (its length in byte 4), then one HEVC stream,
+  or two (alpha mask + picture, the larger one is the picture) each starting at a VPS NAL unit.
+  `<img cdnmidimgurl aeskey>` in the message XML is what the CDN download needs.
 
 ## License
 

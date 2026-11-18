@@ -32,6 +32,7 @@ timeout_seconds = 60
 system_prompt = """你是一个友好的聊天伙伴，正在微信上和朋友聊天。
 用简体中文，像真人发微信一样简短自然地回复，一般一两句话，不用 Markdown。
 消息里的 [语音] 是语音转写的文字，可能有错字，按意思理解；[图片] 后面附有图片。
+你的知识有截止日期，可能过时：公司、股票、产品、人物、政策这类会变的事，先上网搜索再下结论，别凭记忆说“没有/不是”。
 需要实时信息（天气、新闻、价格等）就上网搜索，用中文关键词，例如“北京天气预报 今天”；如果天气工具没数据，就换关键词搜中国天气网等网页，别让对方自己去查。"""
 group_prompt = """这是一个微信群，每条消息前面是发言人的名字。
 只有被 @ 时你才会被叫出来：只回应 @ 你的那条消息，结合前面的群聊理解。单独一个 [语音] 是没转写的语音，听不到内容，别猜。"""
@@ -40,4 +41,6 @@ group_prompt = """这是一个微信群，每条消息前面是发言人的名�
 provider = "combo"          # volc-file-2 + deepseek + openai -> deepseek-flash
 
 [media]
-image_wait_seconds = 0      # full images only download when opened in the client; use the thumbnail right away
+fetch_full = true           # WeChat only downloads full-size images when opened; have WeChat-debug fetch them
+fetch_timeout_seconds = 10  # then fall back to the thumbnail
+image_wait_seconds = 0      # extra wait for the client's own full-size download (not needed with fetch_full)

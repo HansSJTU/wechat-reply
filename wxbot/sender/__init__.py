@@ -1,3 +1,3 @@
-from .native import NativeSender, NotReady
+from .native import NativeSender, NotReady, Refused
 
-__all__ = ["NativeSender", "NotReady"]
+__all__ = ["NativeSender", "NotReady", "Refused"]

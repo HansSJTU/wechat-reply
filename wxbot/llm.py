@@ -8,6 +8,8 @@ import httpx
 
 from stt import keys
 
+from .log import log
+
 URL = "https://api.openai.com/v1/responses"
 IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 WEEKDAYS = "一二三四五六日"
@@ -66,4 +68,7 @@ def reply(cfg, history, group=False):
     out = r.json().get("output", [])
     text = "".join(c.get("text", "") for item in out if item.get("type") == "message"
                    for c in item.get("content", []) if c.get("type") == "output_text")
+    searches = [(i.get("action") or {}).get("query") or "" for i in out if i.get("type") == "web_search_call"]
+    if searches:
+        log(f"llm web search x{len(searches)}: " + " | ".join(q for q in searches if q)[:200])
     return _clean(text)
