@@ -238,11 +238,21 @@ uv run stt/label.py export    # data/labels/wenet/{train,test}.jsonl, {"key","wa
   status done/skip/bad/exclude). Export strips punctuation and lists out-of-vocabulary characters.
 - **不使用 (exclude)**: keeps the transcript but puts the clip in neither train nor test (private content,
   test messages to the bot, …). Only `done` clips are exported; change a clip's status any time.
+- **我听到的 → 转换** (above the transcript): type what you heard, mixing Wu characters, Mandarin and
+  pinyin (“我们这个鱼要吃吗 要吃的我拿一点起lang”), press ⏎, and the chosen model (with the whole
+  说法表 in the prompt) returns the 余姚话 in 说法表 spellings plus the Mandarin meaning, each with a
+  “用这个” button. Pick the model next to the input (remembered in the browser; list in `CONVERT_MODELS`):
+  `gemini-4-hydrogen` (~10–15 s) or `gpt-6.2-sol` (~3–5 s, about as good on text). Only Gemini can take
+  the audio: ticking 带录音 also sends the clip (~1 min) and may fill in parts you missed — or invent some,
+  so check by ear. Audio alone without your sentence is not usable: on 18 labeled clips Gemini scored CER
+  69% (hydrogen) / 84% (flash) vs 56% for the whisper-wu draft, often with fluent made-up sentences.
+  Same from the shell: `uv run stt/label.py convert "…" [--model gpt-6.2-sol] [--key …]`.
 - **说法表** (header button; `data/labels/glossary.json`): one chosen spelling per 余姚话 word, its
   Mandarin meaning, and spellings to flag. When a flagged spelling (e.g. the drafts' 上海话 伊/今朝, or a
   homophone like 几么) is in the transcript, the page offers a one-click replace. Select text in the
-  transcript → “把选中的字加入说法表” to add an entry. Seeded with 今末=今天, 咋话=怎么样, 姆妈=妈妈,
-  渠=他/她. Meant to double as a dictionary for the LLM step (a test with a hand-written Wu transcript of
+  transcript → “把选中的字加入说法表” to add an entry; every entry is also a button under the transcript
+  that inserts it at the cursor. ~200 entries in the spellings of a 余姚城区话 study (今末=今天, 上末=昨天,
+  渠=他/她, 首西=什么, 杂话=怎么样, 葛=的, 噎=这, 啷哉=了). Meant to double as a dictionary for the LLM step (a test with a hand-written Wu transcript of
   clip 18: deepseek-flash CER 73% → 54% with such a table in the prompt).
 - Split: a fixed ~20% of clips by md5 of the file name is **test** — never train on it, it is how a
   fine-tuned model is judged against the original.

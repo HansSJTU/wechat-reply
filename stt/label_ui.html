@@ -82,6 +82,25 @@ kbd { font: 11px ui-monospace, Menlo, monospace; border: 1px solid var(--line); 
 .gwarn button, .tools button { border: 1px solid var(--line); background: var(--panel); color: var(--ink);
   border-radius: 5px; padding: 1px 8px; cursor: pointer; font-size: 12px; }
 .tools { margin-top: 6px; display: flex; gap: 8px; }
+.rough { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.rough input[type=text] { flex: 1; min-width: 220px; }
+.rough button { border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink); border-radius: 6px;
+  padding: 7px 14px; cursor: pointer; font-size: 14px; font-weight: 600; }
+.rough button:disabled { opacity: .55; cursor: default; }
+.rough select { border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 6px; padding: 6px 8px; font-size: 13px; }
+.rough label { font-size: 13px; color: var(--muted); display: flex; gap: 4px; align-items: center; white-space: nowrap; }
+.conv { margin-top: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 8px 10px; display: none; }
+.conv .row { display: flex; gap: 10px; align-items: flex-start; margin: 3px 0; }
+.conv .src { font-size: 12px; color: var(--muted); width: 52px; flex: none; padding-top: 3px; }
+.conv .txt { flex: 1; font-size: 16px; }
+.conv button { border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 6px; padding: 3px 10px; cursor: pointer; font-size: 13px; }
+.conv .notes { font-size: 13px; color: var(--muted); margin-top: 4px; }
+.conv .err { color: var(--warn); font-size: 13px; }
+.chips { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+.chips button { border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 999px;
+  padding: 3px 10px; cursor: pointer; font-size: 15px; line-height: 1.3; }
+.chips button:hover { border-color: var(--accent); }
+.chips button small { color: var(--muted); font-size: 11px; margin-left: 4px; }
 dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--ink);
   padding: 0; width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 64px); }
 dialog::backdrop { background: rgba(0,0,0,.35); }
@@ -189,8 +208,17 @@ function select(key) {
     ${drafters.map((d, n) => `<div class="draft"><span class="src">${esc(d)}</span>
       <span class="txt">${esc(it.drafts[d] ?? "（生成中…）")}</span>
       <button data-d="${esc(d)}">用这个 <kbd>⌃${n + 1}</kbd></button></div>`).join("")}
+    <label class="f">我听到的（汉字、普通话、拼音混着写都行，AI 帮你转成说法表写法）</label>
+    <div class="rough">
+      <input type="text" id="rough" placeholder="我们这个鱼要吃吗 要吃的我拿一点起lang" value="${esc(rough[key]?.text ?? "")}">
+      <select id="model" title="转换用的模型">${models.map(m => `<option value="${esc(m.id)}" ${m.id === model ? "selected" : ""}>${esc(m.name)}</option>`).join("")}</select>
+      <label id="audioOpt" title="把录音也发给 Gemini：能补出漏听的部分，但要一分钟左右，而且可能补出没说过的话（只有 Gemini 能听录音）"><input type="checkbox" id="withAudio" ${withAudio ? "checked" : ""}>带录音</label>
+      <button id="convert">转换 <kbd style="border-color:currentColor">⏎</kbd></button>
+    </div>
+    <div class="conv" id="conv"></div>
     <label class="f">实际说的话（用吴语字，照读音写，不要翻译成普通话）</label>
     <textarea id="wu">${esc(start)}</textarea>
+    <div class="chips" id="chips"></div>
     <div class="oov" id="oov"></div>
     <div class="gwarn" id="gwarn"></div>
     <div class="tools"><button id="toGloss">把选中的字加入说法表</button></div>
@@ -205,7 +233,7 @@ function select(key) {
       <span class="hint"><kbd>⌘/Ctrl ⏎</kbd> 保存 · <kbd>Esc</kbd> 重放 · <kbd>⌃1</kbd><kbd>⌃2</kbd> 用草稿</span>
     </div>
     <ul class="guide">
-      <li>写<b>说话人实际说的音</b>，用常见吴语字：侬、阿拉、伊、搿、呒没、覅、葛末、咾……。不确定的字写读音最接近的常用字。</li>
+      <li>写<b>说话人实际说的音</b>，用说法表里的写法（转写框下面的按钮）：侬、阿拉、渠、噎、葛、首西、勿、呒没、啷哉……。说法表里没有、又不确定的字写读音最接近的常用字。</li>
       <li>常说的专有词（食物、药名、地名……）写真实写法，模型就是靠这些学会的。</li>
       <li>标点可写可不写，导出时会去掉。夹杂普通话的部分照普通话写。</li>
       <li>整条是普通话也可以标，帮助模型分清普通话和余姚话。</li>
@@ -222,9 +250,67 @@ function select(key) {
     const ta = $("#wu"); const s = ta.value.slice(ta.selectionStart, ta.selectionEnd).trim();
     openGloss(s ? {wu: s, mandarin: "", avoid: []} : null);
   };
-  checkOov(); checkGloss();
+  $("#convert").onclick = convert;
+  $("#rough").onkeydown = e => { if (e.key === "Enter" && !e.metaKey && !e.ctrlKey && !e.isComposing) { e.preventDefault(); convert(); } };
+  $("#withAudio").onchange = e => { withAudio = e.target.checked; };
+  $("#model").onchange = e => { model = e.target.value; try { localStorage.setItem("convertModel", model); } catch {} syncAudioOpt(); };
+  syncAudioOpt();
+  checkOov(); checkGloss(); renderChips(); renderConv();
   const ta = $("#wu"); ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
   renderList();
+}
+
+// ---- 我听到的 → Gemini / GPT → 余姚话 + 普通话 (kept per clip while the page is open)
+const rough = {};      // key -> {text, busy, res, err}
+let withAudio = false;
+let models = [{id: "gemini-4-hydrogen", name: "Gemini hydrogen"}];
+let model = (() => { try { return localStorage.getItem("convertModel"); } catch { return null; } })() || models[0].id;
+const isGemini = m => m.startsWith("gemini");
+function syncAudioOpt() {  // only Gemini can listen to the clip
+  const cb = $("#withAudio"), lab = $("#audioOpt"); if (!cb) return;
+  cb.disabled = !isGemini(model); lab.style.opacity = cb.disabled ? .4 : 1;
+}
+fetch("/api/models").then(r => r.json()).then(r => {
+  models = r.models; if (!models.some(m => m.id === model)) model = models[0].id;
+  const s = $("#model"); if (s) { s.innerHTML = models.map(m => `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join(""); s.value = model; syncAudioOpt(); }
+}).catch(() => {});
+
+async function convert() {
+  const key = sel, text = $("#rough").value.trim();
+  if (!text || rough[key]?.busy) return;
+  const audio = withAudio && isGemini(model);
+  const st = rough[key] = {text, busy: true, audio, model, t0: Date.now()};
+  renderConv();
+  try {
+    const r = await fetch("/api/convert", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({key, rough: text, audio, model})}).then(r => r.json());
+    if (r.ok) st.res = r; else st.err = r.error || "转换失败";
+  } catch (e) { st.err = String(e); }
+  st.busy = false;
+  if (sel === key) renderConv();
+}
+
+function renderConv() {
+  const el = $("#conv"); if (!el) return;
+  const st = rough[sel];
+  $("#convert").disabled = !!st?.busy;
+  if (!st) { el.style.display = "none"; return; }
+  el.style.display = "block";
+  if (st.busy) { const name = models.find(m => m.id === st.model)?.name ?? st.model;
+    el.innerHTML = `<div class="notes">${esc(name)} 转换中…（${st.audio ? "带录音，约一分钟" : isGemini(st.model) ? "约 15 秒" : "约 5 秒"}）</div>`; return; }
+  if (st.err) { el.innerHTML = `<div class="err">${esc(st.err)}</div>`; return; }
+  const r = st.res;
+  el.innerHTML = `
+    <div class="row"><span class="src">余姚话</span><span class="txt">${esc(r.wu)}</span><button id="useWu">用这个</button></div>
+    <div class="row"><span class="src">普通话</span><span class="txt">${esc(r.mandarin)}</span><button id="useMd">用这个</button></div>
+    <div class="row"><span class="src"></span><span class="txt"></span><button id="useBoth">两个都用</button></div>
+    ${r.notes ? `<div class="notes">备注：${esc(r.notes)}</div>` : ""}
+    <div class="notes">${esc(r.model)} · ${r.seconds}s${r.audio ? " · 带录音" : ""}</div>`;
+  const useWu = () => { $("#wu").value = r.wu; checkOov(); checkGloss(); };
+  const useMd = () => { $("#meaning").value = r.mandarin; };
+  $("#useWu").onclick = () => { useWu(); $("#wu").focus(); };
+  $("#useMd").onclick = useMd;
+  $("#useBoth").onclick = () => { useWu(); useMd(); $("#wu").focus(); };
 }
 
 function useDraft(d) {
@@ -256,6 +342,21 @@ function checkGloss() {
   });
 }
 
+// One button per 说法表 word under the transcript: click inserts it at the cursor (replacing a selection).
+function renderChips() {
+  const el = $("#chips"); if (!el) return;
+  el.innerHTML = gloss.map((e, i) => `<button data-i="${i}" title="${esc(e.mandarin)}">${esc(e.wu)}${
+    e.mandarin ? `<small>${esc(e.mandarin)}</small>` : ""}</button>`).join("");
+  el.querySelectorAll("button").forEach(b => {
+    b.onmousedown = ev => ev.preventDefault();  // keep the cursor/selection in the textarea
+    b.onclick = () => {
+      const ta = $("#wu"), w = gloss[+b.dataset.i].wu;
+      ta.focus(); ta.setRangeText(w, ta.selectionStart, ta.selectionEnd, "end");
+      checkOov(); checkGloss();
+    };
+  });
+}
+
 function growHtml(e) {
   return `<div class="grow"><input class="wu" value="${esc(e.wu)}" placeholder="今末">
     <input class="md" value="${esc(e.mandarin)}" placeholder="今天">
@@ -283,7 +384,7 @@ async function saveGloss() {
     body: JSON.stringify({entries})}).then(r => r.json());
   if (!r.ok) { $("#gsaved").textContent = "保存失败"; return; }
   gloss = r.entries; $("#glossBtn").textContent = `说法表（${gloss.length}）`;
-  $("#gloss").close(); checkGloss();
+  $("#gloss").close(); checkGloss(); renderChips();
 }
 
 $("#glossBtn").onclick = () => openGloss(null);
@@ -293,7 +394,7 @@ $("#gadd").onclick = () => { $("#grows").insertAdjacentHTML("beforeend", growHtm
   $(".del", r).onclick = () => r.remove(); $(".wu", r).focus(); };
 $("#gsave").onclick = saveGloss;
 fetch("/api/glossary").then(r => r.json()).then(r => { gloss = r.entries;
-  $("#glossBtn").textContent = `说法表（${gloss.length}）`; checkGloss(); });
+  $("#glossBtn").textContent = `说法表（${gloss.length}）`; checkGloss(); renderChips(); });
 
 function replay() { const a = $("#au"); if (a) { a.currentTime = 0; a.play(); } }
 
