@@ -213,7 +213,7 @@ function select(key) {
       <input type="text" id="rough" placeholder="我们这个鱼要吃吗 要吃的我拿一点起lang" value="${esc(rough[key]?.text ?? "")}">
       <select id="model" title="转换用的模型">${models.map(m => `<option value="${esc(m.id)}" ${m.id === model ? "selected" : ""}>${esc(m.name)}</option>`).join("")}</select>
       <label id="audioOpt" title="把录音也发给 Gemini：能补出漏听的部分，但要一分钟左右，而且可能补出没说过的话（只有 Gemini 能听录音）"><input type="checkbox" id="withAudio" ${withAudio ? "checked" : ""}>带录音</label>
-      <button id="convert">转换 <kbd style="border-color:currentColor">⏎</kbd></button>
+      <button id="convert">转换 <kbd style="border-color:currentColor">⌃⏎</kbd></button>
     </div>
     <div class="conv" id="conv"></div>
     <label class="f">实际说的话（用吴语字，照读音写，不要翻译成普通话）</label>
@@ -251,7 +251,12 @@ function select(key) {
     openGloss(s ? {wu: s, mandarin: "", avoid: []} : null);
   };
   $("#convert").onclick = convert;
-  $("#rough").onkeydown = e => { if (e.key === "Enter" && !e.metaKey && !e.ctrlKey && !e.isComposing) { e.preventDefault(); convert(); } };
+  // ⌃⏎ converts (plain ⏎ does nothing, so finishing an IME word can't fire it); ⌘⏎ still saves
+  $("#rough").onkeydown = e => {
+    if (e.key !== "Enter" || e.isComposing) return;
+    if (e.ctrlKey && !e.metaKey) { e.preventDefault(); e.stopPropagation(); convert(); }
+    else if (!e.metaKey) e.preventDefault();
+  };
   $("#withAudio").onchange = e => { withAudio = e.target.checked; };
   $("#model").onchange = e => { model = e.target.value; try { localStorage.setItem("convertModel", model); } catch {} syncAudioOpt(); };
   syncAudioOpt();
@@ -404,10 +409,13 @@ async function save(st) {
   const r = await fetch("/api/label", {method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({key: sel, wu, meaning: $("#meaning").value, status: st})}).then(r => r.json());
   if (!r.ok) { alert("保存失败"); return; }
+  const before = visible(), idx = before.findIndex(i => i.key === sel);
   const it = items.find(i => i.key === sel); it.label = r.label;
   renderProgress();
-  const vis = visible(); const idx = vis.findIndex(i => i.key === sel);
-  const next = filter === "todo" ? vis[0] : vis[idx + 1];
+  // the clip right below this one that is still in the list (in 待标注 the saved one drops out);
+  // only when there is none below, wrap to the top
+  const vis = visible(), keys = new Set(vis.map(i => i.key));
+  const next = before.slice(idx + 1).find(i => keys.has(i.key)) ?? vis.find(i => i.key !== sel);
   if (next && next.key !== sel) select(next.key); else { renderList(); select(sel); }
 }
 

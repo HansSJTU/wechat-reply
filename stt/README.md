@@ -231,7 +231,7 @@ uv run stt/label.py export    # data/labels/wenet/{train,test}.jsonl, {"key","wa
 - Voices: every `type: voice` entry in `data/messages.jsonl` (what monitor.py saves). `serve` drafts new
   ones in the background every 30 s.
 - Page: newest unlabeled first, audio autoplays, two drafts to start from, a field for the Wu transcript
-  and an optional Mandarin meaning (pre-filled from earlier `-e` references). ⌘/Ctrl+Enter save & next,
+  and an optional Mandarin meaning (pre-filled from earlier `-e` references). ⌘/Ctrl+Enter save & go to the clip below (Ctrl+Enter in the 我听到的 box converts instead),
   Esc replay, Ctrl+1/2 use a draft. Warns about characters missing from the model's 5946-char vocabulary
   (they can't be learned without growing the vocabulary).
 - Files: `data/labels/drafts.json`, `data/labels/labels.jsonl` (append-only; last line per clip wins;
@@ -239,7 +239,7 @@ uv run stt/label.py export    # data/labels/wenet/{train,test}.jsonl, {"key","wa
 - **不使用 (exclude)**: keeps the transcript but puts the clip in neither train nor test (private content,
   test messages to the bot, …). Only `done` clips are exported; change a clip's status any time.
 - **我听到的 → 转换** (above the transcript): type what you heard, mixing Wu characters, Mandarin and
-  pinyin (“我们这个鱼要吃吗 要吃的我拿一点起lang”), press ⏎, and the chosen model (with the whole
+  pinyin (“我们这个鱼要吃吗 要吃的我拿一点起lang”), press ⌃⏎ (plain ⏎ does nothing), and the chosen model (with the whole
   说法表 in the prompt) returns the 余姚话 in 说法表 spellings plus the Mandarin meaning, each with a
   “用这个” button. Pick the model next to the input (remembered in the browser; list in `CONVERT_MODELS`):
   `gemini-4-hydrogen` (~10–15 s) or `gpt-6.2-sol` (~3–5 s, about as good on text). Only Gemini can take
