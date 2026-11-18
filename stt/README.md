@@ -223,6 +223,7 @@ sound→character, not translation; the LLM step still translates).
 
 ```
 uv run stt/label.py serve     # http://127.0.0.1:8765 — local only; audio never leaves the machine
+scripts/install.sh label      # or keep it running in the background under launchd (see the main README)
 uv run stt/label.py draft     # pre-fill drafts (whisper-wu + wu-local) for every saved voice
 uv run stt/label.py export    # data/labels/wenet/{train,test}.jsonl, {"key","wav","txt"} for WeNet
 ```

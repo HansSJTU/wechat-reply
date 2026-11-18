@@ -177,6 +177,11 @@ The native sender is GPL-3.0-or-later; see `tools/NATIVE_SEND_NOTICE.md`.
   "data from other apps" to app bundles, so the bundle needs Full Disk Access. The grant is tied to
   the launcher's signature: `install.sh` rebuilds it only when `scripts/launcher.c` changes, and the
   launcher runs `monitor.py`, so keep that file name. `scripts/install.sh uninstall` removes it.
+- The labeling page can run the same way: `scripts/install.sh label` installs `WeChat Label.app`
+  (`com.local.wechat-label`, its own launcher `scripts/label_launcher.c`, so rebuilding one never resets
+  the other's privacy grants). It keeps http://127.0.0.1:8765 up across logins and restarts it if it
+  dies; it needs only the Documents folder. Log: `data/label.log`. `scripts/install.sh label uninstall`
+  removes it.
 
 ## Speech-to-text (`stt/`)
 
