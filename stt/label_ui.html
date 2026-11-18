@@ -193,7 +193,7 @@ function renderList() {
     const txt = (it.label && it.label.wu) || (it.drafts[drafters[0]] ?? "（草稿生成中）");
     return `<div class="item ${it.key === sel ? "sel" : ""} ${status(it)}" data-k="${esc(it.key)}">
       <span class="dot ${status(it)}"></span>
-      <div><div class="t">${esc(txt)}</div><div class="meta">${esc(it.key)} · ${it.seconds}s · ${fmtTime(it.time)}</div></div>
+      <div><div class="t">${esc(txt)}</div><div class="meta">${esc(it.key)} · ${it.seconds}s${it.label?.trim ? ` → ${(it.label.trim[1] - it.label.trim[0]).toFixed(1)}s` : ""} · ${fmtTime(it.time)}</div></div>
       ${it.split === "test" ? '<span class="tag">测试</span>' : ""}</div>`;
   }).join("") || '<div class="empty">无</div>';
   document.querySelectorAll(".item").forEach(el => el.onclick = () => select(el.dataset.k));
