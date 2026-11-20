@@ -62,9 +62,19 @@ def _post(cfg, body):
     return text, out
 
 
+BEIJING = datetime.timezone(datetime.timedelta(hours=8))
+
+
 def _now():
-    now = datetime.datetime.now()
-    return f"现在是 {now:%Y-%m-%d %H:%M}（星期{WEEKDAYS[now.weekday()]}）。"
+    """The bot's clock with its timezone, plus Beijing time when that differs: a bare "12:30" reads as
+    Beijing time to the model, so "美股今天" became the previous close while the US market was open."""
+    now = datetime.datetime.now().astimezone()
+    off = now.strftime("%z")
+    text = f"现在是本机时间 {now:%Y-%m-%d %H:%M} 星期{WEEKDAYS[now.weekday()]}（{now.tzname()}，UTC{off[:3]}:{off[3:]}）"
+    if now.utcoffset() != BEIJING.utcoffset(None):
+        bj = now.astimezone(BEIJING)
+        text += f"，北京时间 {bj:%Y-%m-%d %H:%M} 星期{WEEKDAYS[bj.weekday()]}"
+    return text + "。"
 
 
 def reply(cfg, history, group=False, extra=None):
