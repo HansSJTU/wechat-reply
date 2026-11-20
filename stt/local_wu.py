@@ -11,11 +11,13 @@ from .audio import RATE, Audio
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_DIR = os.path.join(ROOT, "models", "wu-u2pp-int8")
-_rec = None
+# Same model fine-tuned on the labeled WeChat voices (finetune/u2pp.py train + export).
+FT_DIR = os.path.join(ROOT, "models", "wu-u2pp-ft")
+_recs = {}
 
 
-def ready() -> bool:
-    if not os.path.exists(os.path.join(MODEL_DIR, "model.int8.onnx")):
+def ready(model_dir: str = MODEL_DIR) -> bool:
+    if not os.path.exists(os.path.join(model_dir, "model.int8.onnx")):
         return False
     try:
         import sherpa_onnx  # noqa: F401
@@ -24,21 +26,20 @@ def ready() -> bool:
     return True
 
 
-def _recognizer():
-    global _rec
-    if _rec is None:
+def _recognizer(model_dir: str):
+    if model_dir not in _recs:
         import sherpa_onnx
-        _rec = sherpa_onnx.OfflineRecognizer.from_wenet_ctc(
-            model=os.path.join(MODEL_DIR, "model.int8.onnx"),
-            tokens=os.path.join(MODEL_DIR, "tokens.txt"),
+        _recs[model_dir] = sherpa_onnx.OfflineRecognizer.from_wenet_ctc(
+            model=os.path.join(model_dir, "model.int8.onnx"),
+            tokens=os.path.join(model_dir, "tokens.txt"),
             num_threads=4,
         )
-    return _rec
+    return _recs[model_dir]
 
 
-def transcribe(audio: Audio) -> str:
+def transcribe(audio: Audio, model_dir: str = MODEL_DIR) -> str:
     samples = array.array("h", audio.pcm)  # 16-bit little-endian mono
-    rec = _recognizer()
+    rec = _recognizer(model_dir)
     s = rec.create_stream()
     s.accept_waveform(RATE, [x / 32768.0 for x in samples])
     rec.decode_stream(s)

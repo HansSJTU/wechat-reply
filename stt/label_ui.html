@@ -30,6 +30,7 @@ h1 { font-size: 17px; margin: 0; font-weight: 600; }
 main { display: grid; grid-template-columns: 300px 1fr; min-height: calc(100vh - 57px); }
 aside { border-right: 1px solid var(--line); background: var(--panel); overflow-y: auto; max-height: calc(100vh - 57px); position: sticky; top: 57px; }
 .tabs { display: flex; gap: 4px; padding: 10px; border-bottom: 1px solid var(--line); }
+.tabs.src { padding-top: 0; }
 .tabs button { flex: 1; border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 6px;
   padding: 5px 0; cursor: pointer; font-size: 13px; }
 .tabs button.on { background: var(--soft); color: var(--ink); border-color: var(--accent); }
@@ -142,6 +143,9 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
     <div class="tabs">
       <button data-f="todo" class="on">待标注</button><button data-f="done">已完成</button><button data-f="all">全部</button>
     </div>
+    <div class="tabs src">
+      <button data-s="all" class="on">全部来源</button><button data-s="wechat">微信</button><button data-s="bili">视频</button><button data-s="web">网络</button><button data-s="words">词组</button>
+    </div>
     <div id="list"></div>
   </aside>
   <section class="editor" id="editor"><div class="empty">加载中…</div></section>
@@ -159,7 +163,10 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
 </dialog>
 <script>
 const TARGET_MIN = 30;
-let items = [], drafters = [], vocab = new Set(), filter = "todo", sel = null;
+let items = [], drafters = [], vocab = new Set(), filter = "todo", source = "all", sel = null;
+// drafts shown for one clip: the on-screen subtitle conversion (video clips) first, then the ASR drafts
+const draftsOf = it => [...(it.drafts["字幕"] != null ? ["字幕"] : []), ...drafters,
+  ...Object.keys(it.drafts).filter(k => k !== "字幕" && !drafters.includes(k))];  // + the bot's cloud candidates
 
 const $ = (s, el = document) => el.querySelector(s);
 const esc = s => (s || "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
@@ -177,7 +184,8 @@ async function load(keepSel = true) {
 }
 
 function visible() {
-  return items.filter(it => filter === "all" || (filter === "todo" ? !status(it) : !!status(it))).slice().reverse();
+  return items.filter(it => (filter === "all" || (filter === "todo" ? !status(it) : !!status(it)))
+    && (source === "all" || (it.source || "wechat") === (source === "bili" ? "video" : source))).slice().reverse();
 }
 
 function renderProgress() {
@@ -190,7 +198,7 @@ function renderProgress() {
 
 function renderList() {
   $("#list").innerHTML = visible().map(it => {
-    const txt = (it.label && it.label.wu) || (it.drafts[drafters[0]] ?? "（草稿生成中）");
+    const txt = (it.label && it.label.wu) || (it.drafts[draftsOf(it)[0]] ?? "（草稿生成中）");
     return `<div class="item ${it.key === sel ? "sel" : ""} ${status(it)}" data-k="${esc(it.key)}">
       <span class="dot ${status(it)}"></span>
       <div><div class="t">${esc(txt)}</div><div class="meta">${esc(it.key)} · ${it.seconds}s${it.label?.trim ? ` → ${(it.label.trim[1] - it.label.trim[0]).toFixed(1)}s` : ""} · ${fmtTime(it.time)}</div></div>
@@ -203,7 +211,7 @@ function select(key) {
   sel = key;
   const it = items.find(i => i.key === key);
   const lab = it.label || {};
-  const start = lab.wu ?? it.drafts[drafters[0]] ?? "";
+  const start = lab.wu ?? it.drafts[draftsOf(it)[0]] ?? "";
   $("#editor").innerHTML = `
     <div class="head"><span class="name">${esc(it.key)}</span>
       <span class="meta">${esc(it.sender || "")} · ${it.seconds}s · ${fmtTime(it.time)}</span>
@@ -214,7 +222,7 @@ function select(key) {
     <div class="trim"><button id="autoTrim">去掉首尾空白</button><button id="clearTrim">不裁剪</button>
       <span id="trimInfo"></span><span>· 在波形上拖动选出要保留的部分，点一下从那里播放</span></div>
     <label class="f">模型草稿（点“用这个”填进下面）</label>
-    ${drafters.map((d, n) => `<div class="draft"><span class="src">${esc(d)}</span>
+    ${draftsOf(it).map((d, n) => `<div class="draft"><span class="src">${esc(d)}</span>
       <span class="txt">${esc(it.drafts[d] ?? "（生成中…）")}</span>
       <button data-d="${esc(d)}">用这个 <kbd>⌃${n + 1}</kbd></button></div>`).join("")}
     <label class="f">我听到的（汉字、普通话、拼音混着写都行，AI 帮你转成说法表写法）</label>
@@ -311,7 +319,7 @@ function renderConv() {
   if (!st) { el.style.display = "none"; return; }
   el.style.display = "block";
   if (st.busy) { const name = models.find(m => m.id === st.model)?.name ?? st.model;
-    el.innerHTML = `<div class="notes">${esc(name)} 转换中…（${st.audio ? "带录音，约一分钟" : isGemini(st.model) ? "约 15 秒" : "约 5 秒"}）</div>`; return; }
+    el.innerHTML = `<div class="notes">${esc(name)} 转换中…（${st.audio ? "带录音，约一分钟" : st.model.startsWith("agy:") ? "约 40 秒" : isGemini(st.model) ? "约 15 秒" : "约 5 秒"}）</div>`; return; }
   if (st.err) { el.innerHTML = `<div class="err">${esc(st.err)}</div>`; return; }
   const r = st.res;
   el.innerHTML = `
@@ -517,10 +525,11 @@ document.addEventListener("keydown", e => {
   if ($("#gloss").open) return;  // Esc closes the dialog; no label shortcuts behind it
   if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); save("done"); }
   else if (e.key === "Escape") { e.preventDefault(); replay(); }
-  else if (e.ctrlKey && !e.metaKey && /^[1-9]$/.test(e.key)) { const d = drafters[+e.key - 1]; if (d) { e.preventDefault(); useDraft(d); } }
+  else if (e.ctrlKey && !e.metaKey && /^[1-9]$/.test(e.key)) { const it = items.find(i => i.key === sel), d = it && draftsOf(it)[+e.key - 1]; if (d) { e.preventDefault(); useDraft(d); } }
 });
 document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
-  filter = b.dataset.f; document.querySelectorAll(".tabs button").forEach(x => x.classList.toggle("on", x === b));
+  if (b.dataset.f) filter = b.dataset.f; else source = b.dataset.s;
+  b.parentElement.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
   renderList(); const v = visible(); if (v.length && !v.find(i => i.key === sel)) select(v[0].key);
 });
 

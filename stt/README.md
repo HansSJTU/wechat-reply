@@ -27,7 +27,7 @@ console's single key — not the console's "Secret Key").
 
 | name | API | notes |
 |---|---|---|
-| **`combo`** (default) | `volc-file-2` + `deepseek` + `openai` in parallel → `deepseek-flash` LLM | best on 余姚话; ~2.9 s; see below |
+| **`combo`** (default) | local `whisper-ft` (audio stays on this machine; `wu-ft` also runs and is recorded, but since 2026-11-19 is not shown to the LLM) → `deepseek-flash` LLM with the 余姚话 notes (`stt/yuyao_notes.md`) and the 说法表 in its prompt | best on 余姚话; ~2–3 s; until 2026-11-19 it also used the cloud `volc-file-2` + `deepseek` + `openai`, see below |
 | `openai` | `gpt-transcribe` | current model; `languages=[zh]` + a prompt asking for Simplified Chinese |
 | `openai-4o`, `-4o-mini`, `-whisper` | older models | shut down 2027-02-26; kept for comparison |
 | `deepseek` | `POST /v1/tools/asr` | no model/language/prompt params; ≤120 s, ≤8 MiB; lists only `zh`/`yue` |
@@ -247,7 +247,7 @@ uv run stt/label.py export    # data/labels/wenet/{train,test}.jsonl, {"key","wa
   pinyin (“我们这个鱼要吃吗 要吃的我拿一点起lang”), press ⌃⏎ (plain ⏎ does nothing), and the chosen model (with the whole
   说法表 in the prompt) returns the 余姚话 in 说法表 spellings plus the Mandarin meaning, each with a
   “用这个” button. Pick the model next to the input (remembered in the browser; list in `CONVERT_MODELS`):
-  `gemini-4-hydrogen` (~10–15 s) or `gpt-6.2-sol` (~3–5 s, about as good on text). Only Gemini can take
+  `gpt-6.2-sol` (default, ~3–5 s) or `gemini-4-hydrogen` (~10–15 s, only if picked). Only Gemini can take
   the audio: ticking 带录音 also sends the clip (~1 min) and may fill in parts you missed — or invent some,
   so check by ear. Audio alone without your sentence is not usable: on 18 labeled clips Gemini scored CER
   69% (hydrogen) / 84% (flash) vs 56% for the whisper-wu draft, often with fluent made-up sentences.
@@ -261,3 +261,148 @@ uv run stt/label.py export    # data/labels/wenet/{train,test}.jsonl, {"key","wa
   clip 18: deepseek-flash CER 73% → 54% with such a table in the prompt).
 - Split: a fixed ~20% of clips by md5 of the file name is **test** — never train on it, it is how a
   fine-tuned model is judged against the original.
+
+### Chat viewer (`/chats` on the labeling server)
+
+http://127.0.0.1:8765/chats — a WeChat-style view of each watched chat (`stt/chat_view.py` +
+`stt/chats_ui.html`, local only): the chat list with each chat's 开启/关闭 state, the messages and the
+bot's replies, a strip of 开启/关闭 periods with a tick per switch, a marker in the conversation at every
+switch, and under each voice the bot's final Mandarin, every recognizer's candidate (expand), the local
+model drafts and the human label if any. Refreshes every 10 s.
+
+### Reading sheets (`stt/read_sheets.py`)
+
+Instead of transcribing what people said, write the text first and have people read it: sentences in
+说法表 spellings (`data/read/sentences.tsv`: id, 余姚话, 普通话) go out as numbered sheets of 50, with a
+pinyin-style reading hint per sentence (`data/read/readings.tsv`, words before characters) so readers
+recognise unusual characters; they send one WeChat voice per sentence. `check` flags characters missing
+from the model vocabulary, 说法表 avoid-spellings, odd lengths, characters without a 余姚 reading, and
+lists unused 说法表 words; `sheets` writes `data/read/sheets/sheet-NN.txt` (+ `.json` with the ids).
+Read speech is train-only; the test split stays real WeChat voice.
+
+### Clips from videos (`stt/bili_ocr.py`, `stt/bili_clips.py`)
+
+余姚话 videos whose on-screen text says what is spoken, downloaded to `data/bili/` (`<name>.mp4` + `.m4a`):
+`bili_ocr.py` reads the text with macOS Vision (local) into timed segments, `bili_clips.py build` groups
+them and cuts trimmed 16 kHz clips, `convert` has GPT (text only, no audio leaves the machine) propose the 余姚话 in 说法表
+spellings from the on-screen text plus the local whisper-wu / wu-local drafts, and `publish`
+writes `data/labels/extra_clips.jsonl`. The labeling page lists them under 视频 with the proposal as the
+“字幕” draft and the Mandarin as the meaning; they are confirmed by ear like WeChat voices and are train-only.
+Subtitles may trail the speech: the lag per range in `SOURCES` was found by matching subtitles against a
+CTC character timeline of the whole audio.
+
+### Downstream check (2026-11-19)
+
+deepseek-flash given the 5 WeChat + 11 语保 test clips, judged by hand against the labeled Mandarin meaning
+(✓ right / △ gist / ✗ wrong), prompt with the 说法表 + `stt/yuyao_notes.md`:
+
+| input | WeChat | 语保 |
+|---|---|---|
+| the exact 余姚话 label | 2/3/0 | 9/1/1 |
+| whisper-ft | 1/0/4 | 7/2/2 |
+| wu-ft | 0/0/5 | 4/1/6 |
+| whisper-ft + wu-ft | 1/0/4 | 8/1/2 |
+
+From a correct transcript the LLM gets the meaning; the bottleneck is recognition. A wrong key word is not
+recovered but smoothed into a fluent wrong sentence (㑚好勿出去哉 → "你们好收衣服了"), so near-homophone
+errors in content words and dropped negations are what matter, not CER as such.
+
+### Fine-tuning (`finetune/u2pp.py`)
+
+```
+uv run stt/label.py export                 # refresh data/labels/wenet/{train,test}.jsonl
+uv run finetune/u2pp.py eval               # CER of the original model
+uv run finetune/u2pp.py train --lr 1e-4 --epochs 20   # → models/wu-u2pp-ft/final.pt
+```
+
+Starts from ASLP-lab's fp32 PyTorch U2++ (`models/wu-u2pp-torch/`, 525 MB, from
+`ASLP-lab/WenetSpeech-Wu-Speech-Understanding/u2++`; same 5946-char vocabulary as wu-local) with WeNet
+pinned to a commit and torch 2.5.1 (newer torch breaks WeNet's imports). Full fine-tune on the Apple GPU
+(MPS, default): the CTC loss runs on CPU and the Conformer's depthwise conv is computed from shifted copies
+(torch 2.5 has no / a broken MPS kernel for them), batches are padded to a few fixed shapes so compiled
+kernels are reused, and AdamW is fused — ~12 s per epoch for 11 min of audio vs ~38 s with `--device cpu`.
+fbank, speed perturb and SpecAugment as in the recipe. `uv run finetune/u2pp.py export` writes
+`models/wu-u2pp-ft/model.int8.onnx` + `tokens.txt` in wu-local's sherpa-onnx format; it runs as the `wu-ft`
+provider and the third draft on the labeling page.
+
+Test sets, reported apart: WeChat voices (the fixed hash split, 5 clips) and ~20% of the 余姚 语保
+sentences (11 clips, read speech). 慈溪 clips are train only. CER of the int8 models:
+
+| model | train data | WeChat test | 语保 test |
+|---|---|---|---|
+| wu-local (original) | — | 69.1% | 32.9% |
+| v1 | 28 WeChat, 2.4 min | 58.8% | — |
+| v2 | + all 44 余姚 语保, 5.8 min | 55.9% | (trained on them) |
+| v3 | 31 WeChat + 33 余姚 语保 + 43 慈溪 语保 + 5 慈溪 course, 10.9 min | 52.9% | 15.7% |
+
+(lr 1e-4, 20 epochs; the test CER bottoms out around epoch 12–16.) Drafts of clips a model was trained on
+look much better than they are (it memorized them); judge it on new clips.
+
+2026-11-19, after labeling the 词组 videos (17.8 min: + 410 word clips, 4 web clips, 1 WeChat voice; the test
+set gained one WeChat voice, 17 clips). CER of the deployed models (int8 sherpa / openai-whisper fp16 beam 5,
+audio resampled to 16 kHz as the bot does) on that test set:
+
+| model | WeChat test | 语保 test |
+|---|---|---|
+| wu-local (original) | 66.2% | 32.1% |
+| wu-ft v3 | 46.6% | 16.4% |
+| **wu-ft v5** (lr 1e-4, 20 epochs) | **43.9%** | **13.6%** |
+| whisper-wu (original) | 51.4% | 26.4% |
+| whisper-ft v1 (112 clips) | 45.9% | 20.0% |
+| **whisper-ft v2** (527 clips, lr 1e-5, 8 epochs) | **46.6%** | **15.7%** |
+
+The WeChat test is 6 clips / 148 characters, so a few points either way is noise; 语保 is the steadier signal.
+One test voice (60) is nearly the same sentence as a train voice (61); without it the numbers move < 3 points.
+
+### Fine-tuning Whisper (`finetune/whisper_ft.py`)
+
+```
+uv run finetune/whisper_ft.py train        # → models/whisper-wu-ft/final.pt (~2 min per epoch on MPS)
+uv run finetune/whisper_ft.py export       # → whisper-ft.openai.pt (+ .output_layer.pt) for the whisper-ft provider
+```
+
+Full fine-tune of Whisper-Medium-Wu (869 M params, ~23 GB of GPU memory on MPS). Batches group clips of similar
+length and the MPS cache is emptied each epoch: with short word clips and long sentences mixed at random almost
+every step had a new shape, MPS kept memory for each, and an epoch went from 1.5 min to an hour before running out
+of memory. A test clip whose greedy decoding loops past the decoder's 448 positions counts as all wrong.
+
+The openai-whisper conversion (`stt/local_whisper_wu.py`) keeps WeNet's output layer: openai-whisper ties the
+logits to the token embedding with no bias, while WeNet's output layer has a bias and, once fine-tuned, its own
+weight. It is saved next to the checkpoint (`*.output_layer.pt`) and patched into the decoder; dropping it cost
+3–6 points CER. Decoding falls back to temperature sampling when the beam output loops (compression ratio > 2.4),
+as `whisper.transcribe` does.
+
+### Meaning check (`finetune/meaning_eval.py`)
+
+CER counts every particle; what matters is the Mandarin the bot ends up with. `meaning_eval.py` runs each
+test clip's transcript through `stt/refine.py` (the bot's deepseek-flash prompt, 说法表 + `yuyao_notes.md`
+included) and has deepseek-flash judge the result against the labeled Mandarin (✓ same meaning / △ gist /
+✗ wrong; particles, tone and wording ignored); score = ✓ 1, △ ½, ✗ 0. deepseek-flash is not deterministic,
+so `--runs 5` refines every input five times and reports the mean and range.
+
+```
+uv run finetune/meaning_eval.py decode whisper-v3 deployed models/whisper-wu-ft/whisper-ft.openai.pt
+uv run finetune/meaning_eval.py decode wu-v6 u2pp models/wu-u2pp-ft/final.pt
+uv run finetune/meaning_eval.py judge label whisper-v3 whisper-v3+wu-v6 --runs 5 [--llm gpt-6.2-sol]
+```
+
+`label` is the human 余姚话 label (the ceiling); `A+B` gives the LLM both transcripts. `deployed` decodes an
+openai-whisper file as the bot does (fp16, beam 5, loop fallback); `whisper` (greedy) loops on some clips
+and understates Whisper.
+
+2026-11-20, after reviewing the labels against the 说法表 (682 train clips, 20.9 min; same 17 test clips),
+deployed decoding, 5 deepseek-flash runs:
+
+| ASR → deepseek-flash | WeChat (6) | 语保 (11) | CER WeChat / 语保 |
+|---|---|---|---|
+| human label | 67% | 95% | 0 / 0 |
+| whisper-ft v2 | 27% (25–33) | 67% (64–73) | 48.0% / 15.7% |
+| **whisper-ft v3** (lr 1e-5, 8 epochs) | **35%** (33–42) | **83%** (77–86) | **43.9% / 13.6%** |
+| whisper-ft v2 + wu-ft v5 | 25% (17–33) | 74% (73–77) | — |
+| whisper-ft v3 + wu-ft v6 | 33% (33–33) | 81% (77–86) | — |
+
+wu-ft v6 (lr 1e-4, 20 epochs): CER 41.9% / 11.4% (v5: 42.6% / 13.6%). With deployed decoding wu-ft adds
+nothing as a second LLM input, so `COMBO_LLM` stays whisper-ft. gpt-6.2-sol as the refine model scored about
+the same as deepseek-flash (within noise) at ~1.3 s vs ~1.1 s. Even the human label reaches only 67% on the
+WeChat clips: some errors are the LLM's (大X勿X read as "very X" until it went into `yuyao_notes.md`).
+Deployed: whisper-ft v3, wu-ft v6.

@@ -1,7 +1,8 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["cryptography", "zstandard", "pilk", "httpx", "websockets>=13", "frida==17.26.3"]
+# dependencies = ["cryptography", "zstandard", "pilk", "httpx", "websockets>=13", "frida==17.26.3",
+#                 "sherpa-onnx", "torch", "openai-whisper"]  # local wu-ft / whisper-ft for the STT combo
 # ///
 """WeChat reply bot entry point (the LaunchAgent launcher runs this file; keep its name).
 

@@ -35,7 +35,7 @@ own internal send path.
    (AES head + XOR tail, HEVC `wxgf` converted to JPEG with ffmpeg) and attached to the LLM call.
 3. **Reply.** One thread per chat waits for a burst of messages to end (`debounce_seconds`),
    sends the last few hours of the conversation to the LLM, and gets one short reply. Rate limits,
-   a stop file and per-group mute keep it in check.
+   a stop file and a per-chat 开启 / 关闭 switch keep it in check.
 4. **Send.** A Frida agent inside the debug copy of WeChat watches the client's own send routine.
    When you send any text by hand, it captures that call's context (the *seed*) and from then on
    builds new send tasks with it, so replies leave through WeChat itself like a normal message.
@@ -133,20 +133,30 @@ kqueue on message_*.db/-wal -> source.py -> pipeline.py (one thread per chat)
   Event fields: `chat`, `chat_name`, `is_group`, `sender`, `sender_name`, `is_self`, `time`, `type`
   (text/image/voice/app/emoji/…), `text`, `image_path`, `voice_path` (wav), `title`/`url`/`quote`
   for app messages, `latency_ms` (vs sender timestamp), `pipeline_ms` (WeChat DB write -> event).
-  Three lists in `config.toml`, all recorded the same way (voice saved as
-  `data/media/<local_id>_<md5(chat)[:8]>_voice.wav`, picked up by `stt/label.py`): `chats` are always
-  answered; `mention` chats are answered only when a text @-mentions this account (its wxid in the
-  message's `source` `<atuserlist>`, or `@<nickname>` in the text; @所有人 does not count), and their
-  voices never go to cloud STT (the LLM sees `[语音]`); `listen` chats never reach the pipeline.
-  A group whose voices you want as dialect training data fits `mention`. Group lines reach the LLM as
-  `name：text`, with `[llm] group_prompt` appended to the system prompt.
+  Every chat in the three lists of `config.toml` is watched and recorded the same way (voice saved as
+  `data/media/<local_id>_<md5(chat)[:8]>_voice.wav`, picked up by `stt/label.py`). The lists only set a
+  chat's state before its first 开启 / 关闭: `chats` and `mention` start on, `listen` off. Group lines
+  reach the LLM as `name：text`, with `[llm] group_prompt` appended to the system prompt.
 - `pipeline.py`: ignores messages this account sends itself, waits `debounce_seconds` after a
   burst, sends the last `history_hours` of the conversation to the LLM and replies once. Limits:
-  `max_per_minute` per chat; `touch data/STOP` pauses all replies. In a group, "@<this account> 关闭"
-  mutes that chat for `mute_hours` (24): still recorded, no LLM call; "@… 打开" resumes early and
-  starts the LLM's context over (nothing from before the 打开); when the mute runs out on its own,
-  the context starts at its end. Both get a fixed confirmation; the
-  mute and the context start are kept in `bot.db`, so they survive restarts.
+  `max_per_minute` per chat; `touch data/STOP` pauses all replies. Each chat is switched by 开启 /
+  关闭 — in a 1:1 chat the whole message, in a group after an @ of this account (its wxid in the
+  message's `<atuserlist>`, or `@<nickname>`; @所有人 does not count):
+  - 开启: voices are transcribed with `[stt] provider` (combo: local whisper-ft → Mandarin via deepseek-flash, wu-ft run and recorded alongside; the audio stays on this machine); every
+    candidate and the Mandarin are appended to `data/voice_stt.jsonl` (the labeling page shows them as
+    drafts) and the Mandarin enters the conversation as `[语音] …`. 1:1 chats are answered every time.
+    Groups: an @ (or a quoted reply to the bot) is always answered; with `[group] auto` the bot may also
+    speak up unasked — free rules first (no @-someone-else / emoji / links),
+    then a `wait_seconds` pause so people answer each other, then a judge on the OpenAI Decisions API
+    (`gpt-6-luna`: who is it for, what is it, P(speak up) ≥ `reply_threshold`), then cooldowns; the reply
+    model can still back out with `[不回]`. Every verdict goes to `data/group_decisions.jsonl`.
+    The LLM's context starts at the 开启.
+  - 关闭: record only — no cloud STT, no LLM, nothing leaves the machine. Voices are heard by a local
+    model (`[reply] command_stt`: whisper-ft, else wu-ft) only to catch a spoken 开启; that transcript is not kept.
+    Voices still reach the labeling page, which drafts them with the local models.
+  The switch can also be spoken: a voice that is just 开启 / 关闭 (in a group with the bot's name, e.g.
+  "莫名其妙 开启").
+  Both get a fixed confirmation; the state is kept in `bot.db` and survives restarts.
 - `store.py`: `data/bot.db` holds the history the LLM sees. Native sends never appear in WeChat's
   own database, so the bot's replies are recorded only here.
 - `llm.py`: placeholder chat bot on the OpenAI Responses API (`[llm]` in `config.toml`); the

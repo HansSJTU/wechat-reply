@@ -1,14 +1,17 @@
 # Shared defaults. Put your own chats, location and prompts in config.local.toml (gitignored);
 # it overrides this file key by key (tables are merged).
 #
-# Chats the bot answers: remark, nickname, alias, or username (wxid_… / …@chatroom).
-# `uv run monitor.py chats` lists them. Messages this account sends itself are ignored.
+# Watched chats: remark, nickname, alias, or username (wxid_… / …@chatroom).
+# `uv run monitor.py chats` lists them. Messages this account sends itself are ignored. Every message is
+# recorded (data/messages.jsonl; voices as wav for the labeling page, stt/label.py).
+# Each chat is switched with 开启 / 关闭 (1:1: send the word; group: "@<me> 开启"), kept in data/bot.db:
+#   开启  voices are transcribed with [stt] provider; 1:1 chats get a reply to every message, groups when
+#         a message @-mentions this account (or quotes it) and, with [group] auto, now and then unasked
+#   关闭  record only: no STT, no LLM, nothing leaves the machine
+# The lists below only set the state before the first 开启 / 关闭: `chats` and `mention` start on,
+# `listen` starts off. (1:1 vs group decides whether an @ is needed, not the list.)
 chats = []                  # e.g. ["wxid_xxxxxxxx"]
-# Recorded like `listen`, answered only when a message @-mentions this account. Voices here
-# are never sent to cloud STT; the LLM sees them as [语音].
 mention = []                # e.g. ["12345678901@chatroom"]
-# Listen-only: recorded to data/messages.jsonl (voice saved as wav for stt/label.py), never answered,
-# no STT or LLM calls.
 listen = []
 
 [reply]
@@ -18,9 +21,11 @@ max_age_seconds = 600       # don't answer backlog older than this (e.g. after d
 max_per_minute = 6          # per chat
 pending_ttl_seconds = 300   # a reply held for a send context is dropped after this
 stop_file = "data/STOP"     # touch it to pause all replies; delete to resume
-mute_hours = 24             # "@<me> 关闭" in a chat: record only, no LLM, for this long
-mute_words = ["关闭"]
-unmute_words = ["打开", "开启"]  # "@<me> 打开": resume early
+off_words = ["关闭"]         # switch a chat off / on (1:1: the whole message; group: after @<me>), also
+                            # spoken: a voice that is just the word, with the bot's name in a group
+on_words = ["开启", "打开"]
+command_stt = ["whisper-ft", "wu-ft"]  # while off, voices are heard by the first ready of these local
+                            # models only, to catch a spoken 开启 (the transcript is not kept)
 
 [llm]                       # placeholder: OpenAI Responses API chat bot (key: openai_api_key in secrets/stt_keys.toml)
 model = "gpt-5.5"
@@ -35,10 +40,54 @@ system_prompt = """你是一个友好的聊天伙伴，正在微信上和朋友�
 你的知识有截止日期，可能过时：公司、股票、产品、人物、政策这类会变的事，先上网搜索再下结论，别凭记忆说“没有/不是”。
 需要实时信息（天气、新闻、价格等）就上网搜索，用中文关键词，例如“北京天气预报 今天”；如果天气工具没数据，就换关键词搜中国天气网等网页，别让对方自己去查。"""
 group_prompt = """这是一个微信群，每条消息前面是发言人的名字。
-只有被 @ 时你才会被叫出来：只回应 @ 你的那条消息，结合前面的群聊理解。单独一个 [语音] 是没转写的语音，听不到内容，别猜。"""
+单独一个 [语音] 是没转写的语音，听不到内容，别猜。"""
+
+[group]                     # groups that are 开启: an @ (or a quoted reply to the bot) is always answered
+auto = true                 # also speak up unasked when it clearly helps; false = @ only
+names = []                  # what the family calls the bot besides its WeChat nickname, e.g. ["莫名其妙"];
+                            # a transcribed voice that contains one of these is answered like an @
+# [group.members] "<id>@chatroom" = """who is who""" (put it in config.local.toml): added to the reply
+# and judge prompts, so “问妈” or “小明” resolve to a member. Use the names the messages show.
+# Unprompted turns, cheapest check first; every verdict goes to data/group_decisions.jsonl:
+#  1. free rule: some new message is text, a transcribed voice or a photo, and does not @ someone else
+#     or quote someone else (emoji, links, @所有人 never count)
+#  2. wait_seconds after the last message, so people answer each other first (what they say joins the batch)
+#  3. judge (judge_api): decisions = OpenAI Decisions API (gpt-6-luna) answers who it is for, what it is, and
+#     a few facts (answerable? shared with everyone? anything specific to say? nobody answered yet?); the
+#     code replies when the facts that case needs all reach reply_threshold (wxbot/llm.py POLICY).
+#     responses = a Responses call with judge_model that decides itself
+#  4. cooldowns: cooldown_minutes between unprompted replies, share_cooldown_minutes between replies to
+#     shared photos/life; skipped when the judge says the message was aimed at the bot
+#  5. the reply model may still back out ([不回]) if it can't answer for sure
+wait_seconds = 20
+cooldown_minutes = 0         # 0 = off
+share_cooldown_minutes = 0  # 0 = off
+judge_api = "decisions"     # or "responses"
+reply_threshold = 0.75      # decisions: every needed fact must reach this; higher = quieter
+judge_model = ""            # responses: "" = [llm] model
+judge_effort = "low"
+judge_context = 30          # lines of chat the judge sees
+judge_prompt = """你在一个家庭微信群里，名字叫“{names}”。下面是群聊记录，“新消息”是刚收到、没人 @ 你的消息。判断你要不要主动说一句。
+原则是克制：像一个懂事的家庭成员，大多数时候只看不说，拿不准就不说。
+
+应该说话，只有这几种情况：
+1. 新消息在跟你说话（叫了你的名字，或接着你上一句追问、纠正你），而且需要你回应。只是“谢谢”“好的”“哈哈”不用回。“莫名其妙”也是常用词，“这事真莫名其妙”不是在叫你。
+2. 对全群提的问题，答案确定、客观、你能说准（常识、知识、换算、日期、天气、可以查到的事实），而且群里还没人回答。
+3. 分享生活、照片，是发给全群的，等了一会儿还没人接话，就可以接一句：说出照片里具体的东西、笑一下接个梗，或者问一句相关的。别泛泛夸“真好看”，别长篇解说。
+   不回的分享：已经有人接话了；是在给某个人看、接某个人的话（比如股票截图是在回应“中签了吗”）；转账、通知、文件截图。
+
+不说话的情况，包括但不限于：
+- 在问某个群成员，或回应某人刚说的话（叫了名字、称呼“妈”“爸”“你”等）
+- 主观的、家里的事：谁去接、吃什么、几点回来、要不要买，要家人自己定
+- 两三个人正聊得起劲，或者已经有人回答、接话了
+- 表情、没听清的语音、转发的文章、通知、寒暄
+- 你最近刚说过话而大家没接"""
+mention_prompt = """你被 @ 了（或有人引用了你的话、在语音里叫了你的名字）：回应那条消息，结合前面的群聊理解。"""
+auto_prompt = """这次没人 @ 你，是你自己判断要插一句：{reason}
+只说这一点，一两句话，像家里人顺口说一句，别客套、别总结、别长篇解说。如果仔细看后发现没把握、答不准、已经有人回答了，或者其实是在问别人，就只输出 [不回]。"""
 
 [stt]
-provider = "combo"          # volc-file-2 + deepseek + openai -> deepseek-flash
+provider = "combo"          # local whisper-ft -> deepseek-flash (wu-ft only recorded) (audio stays on this machine)
 
 [media]
 fetch_full = true           # WeChat only downloads full-size images when opened; have WeChat-debug fetch them

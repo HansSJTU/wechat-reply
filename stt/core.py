@@ -65,8 +65,13 @@ PROVIDERS: dict[str, Provider] = dict([
        lambda a: siliconflow_api.transcribe(a, "TeleAI/TeleSpeechASR"), siliconflow_api.ready),
     # Local, offline: WenetSpeech-Wu U2++ Conformer (needs sherpa-onnx + models/wu-u2pp-int8)
     _p("wu-local", "本地 WenetSpeech-Wu U2++ int8 (吴语, CPU)", local_wu.transcribe, local_wu.ready),
+    _p("wu-ft", "本地 U2++ 微调版 int8 (用标注的微信语音微调, CPU)",
+       lambda a: local_wu.transcribe(a, local_wu.FT_DIR), lambda: local_wu.ready(local_wu.FT_DIR)),
     _p("whisper-wu", "本地 Whisper-Medium-Wu (WenetSpeech-Wu 微调, MPS)", local_whisper_wu.transcribe,
        local_whisper_wu.ready),
+    _p("whisper-ft", "本地 Whisper-Medium-Wu 微调版 (用标注的语音微调, MPS)",
+       lambda a: local_whisper_wu.transcribe(a, ckpt=local_whisper_wu.FT_CKPT),
+       lambda: local_whisper_wu.ready(local_whisper_wu.FT_CKPT)),
     # Gemini: one multimodal call that hears 余姚话 and writes Mandarin (see gemini_api.MANDARIN)
     _p("gemini-flash", f"Gemini {GEMINI_FLASH} → 普通话",
        lambda a: gemini_api.transcribe(a, GEMINI_FLASH), gemini_api.ready),
@@ -79,7 +84,14 @@ PROVIDERS: dict[str, Provider] = dict([
 ])
 
 # Speech APIs whose transcripts the `combo` provider hands to the LLM (see stt/refine.py).
-COMBO_ASR = ["volc-file-2", "deepseek", "openai"]  # file-2: same output as flash at 0.8 vs 4.5 元/h
+# Since 2026-11-19 only the local fine-tuned models: the audio never leaves this machine, only their
+# text goes to the LLM. On the labeled test clips whisper-ft + wu-ft as LLM input beat either alone; the
+# cloud ASRs (volc-file-2, deepseek, openai) were dropped after they misheard family 余姚话 voices.
+COMBO_ASR = ["whisper-ft", "wu-ft"]
+# Of those, the ones the LLM sees (all are recorded as candidates). Since 2026-11-19 only whisper-ft: wu-ft's
+# near-homophone characters (侬人则个母轻头啦 for 侬认识个母亲头啦) pulled the Mandarin off. The others are
+# used only when these all fail.
+COMBO_LLM = ["whisper-ft"]
 
 
 def _combo(audio: Audio) -> tuple[str, dict]:
@@ -88,7 +100,7 @@ def _combo(audio: Audio) -> tuple[str, dict]:
         asr = list(pool.map(lambda n: transcribe(audio, n), names))
     extra = {"candidates": {r.provider: r.text or f"✗ {r.error}" for r in asr},
              "asr_latency": max(r.latency for r in asr)}
-    texts = [r.text for r in asr if r.text]
+    texts = [r.text for r in asr if r.text and r.provider in COMBO_LLM] or [r.text for r in asr if r.text]
     if not texts:
         raise RuntimeError("every speech API failed: " + "; ".join(f"{r.provider}: {r.error}" for r in asr))
     t = time.monotonic()
@@ -102,7 +114,7 @@ def _combo(audio: Audio) -> tuple[str, dict]:
 
 
 PROVIDERS["combo"] = Provider(
-    "combo", "volc-file-2 + deepseek + openai → deepseek-flash 余姚话→普通话", _combo,
+    "combo", "local whisper-ft (+ wu-ft recorded) → deepseek-flash 余姚话→普通话", _combo,
     lambda: refine.ready() and any(PROVIDERS[n].ready() for n in COMBO_ASR))
 
 

@@ -22,6 +22,7 @@ create table if not exists messages (
 create index if not exists messages_chat_time on messages (chat, time);
 create table if not exists mutes (chat text primary key, until real not null);
 create table if not exists history_floor (chat text primary key, since real not null);
+create table if not exists switches (chat text primary key, on_ integer not null, at real not null);
 """
 
 
@@ -65,8 +66,19 @@ class Store:
             self.db.execute("insert into mutes values (?, ?) on conflict(chat) do update set until = excluded.until",
                             (chat, until))
 
+    def enabled(self, chat):
+        """True / False once the chat was switched with 开启 / 关闭; None before (config decides)."""
+        with self.lock:
+            row = self.db.execute("select on_ from switches where chat = ?", (chat,)).fetchone()
+        return None if row is None else bool(row[0])
+
+    def set_enabled(self, chat, on, at=None):
+        with self.lock:
+            self.db.execute("insert into switches values (?, ?, ?) on conflict(chat) do update set "
+                            "on_ = excluded.on_, at = excluded.at", (chat, int(on), at or time.time()))
+
     def history_floor(self, chat):
-        """The LLM sees nothing older than this (set by "@<me> 打开")."""
+        """The LLM sees nothing older than this (set by 开启)."""
         with self.lock:
             row = self.db.execute("select since from history_floor where chat = ?", (chat,)).fetchone()
         return row[0] if row else 0.0
@@ -80,3 +92,11 @@ class Store:
         with self.lock:
             return self.db.execute("select count(*) from messages where chat = ? and role = 'assistant' "
                                    "and time >= ?", (chat, since)).fetchone()[0]
+
+    def auto_replies(self, chat, since):
+        """Unprompted group replies (meta.auto = the judge's kind) since `since`: [(time, kind)], oldest first."""
+        with self.lock:
+            rows = self.db.execute("select time, json_extract(meta, '$.auto') from messages where chat = ? "
+                                   "and role = 'assistant' and time >= ? and json_extract(meta, '$.auto') "
+                                   "is not null order by time", (chat, since)).fetchall()
+        return [(t, k) for t, k in rows]

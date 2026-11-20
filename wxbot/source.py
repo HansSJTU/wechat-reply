@@ -29,6 +29,7 @@ DOCS = os.path.expanduser("~/Library/Containers/com.tencent.xinWeChat/Data/Docum
 TYPES = {1: "text", 3: "image", 34: "voice", 42: "card", 43: "video", 47: "emoji", 48: "location",
          49: "app", 50: "call", 10000: "system", 10002: "system"}
 ZSTD = zstandard.ZstdDecompressor()
+QUOTED = {"3": "[图片]", "34": "[语音]", "43": "[视频]", "47": "[表情]", "48": "[位置]", "42": "[名片]"}
 
 
 def account_dir():
@@ -206,13 +207,16 @@ class Source:
         if base == 1 or base >= 10000:
             ev["text"] = text
             if ev["is_group"] and base == 1:
-                ev["mentions_me"] = self.mentions_me(text, text_of(src, src_flag))
+                ev["mentions_me"], ev["at_others"] = self.mentions(text, text_of(src, src_flag))
         elif base == 3:
             ev.update(self.image(chat, ctime, local_id, packed, text))
         elif base == 34:
             ev.update(self.voice(chat, server_id, local_id, text))
         elif base == 49:
             ev.update(self.appmsg(text, sub))
+            if ev["is_group"] and ev.get("quote"):  # a quoted reply: to the bot's message, or with an @
+                ev["quotes_me"] = ev["quote"].get("sender") in self.my_names()
+                ev["mentions_me"], ev["at_others"] = self.mentions(ev.get("text") or "", text_of(src, src_flag))
         elif base == 47:
             m = re.search(r'cdnurl\s*=\s*"([^"]+)"', text)
             ev["emoji_url"] = m and m.group(1).replace("&amp;", "&")
@@ -220,13 +224,19 @@ class Source:
             ev["xml"] = text
         return ev
 
-    def mentions_me(self, text, source_xml):
-        """@ this account: its wxid in the message's <atuserlist> (not @所有人), or "@<nickname>" in the text."""
-        m = re.search(r"<atuserlist>(?:<!\[CDATA\[)?([^<\]]*)", source_xml or "")
-        if m and self.me in {u.strip() for u in m.group(1).split(",")}:
-            return True
+    def my_names(self):
+        """What group members see as this account: its nickname plus `[group] names`."""
         nick = (self.contacts.by_user.get(self.me) or {}).get("nick")
-        return bool(nick) and f"@{nick}" in text
+        return {n for n in [nick, *self.cfg.get("group", {}).get("names", [])] if n}
+
+    def mentions(self, text, source_xml):
+        """(@ this account, @ someone else). Me: my wxid in the message's <atuserlist>, or "@<my name>" in
+        the text. Someone else: any other wxid there, or @所有人 (an announcement, not a question to me)."""
+        m = re.search(r"<atuserlist>(?:<!\[CDATA\[)?([^<\]]*)", source_xml or "")
+        users = {u.strip() for u in m.group(1).split(",") if u.strip()} if m else set()
+        me = self.me in users or any(f"@{n}" in text for n in self.my_names())
+        others = bool(users - {self.me, "notify@all"}) or "notify@all" in users or "@所有人" in text
+        return me, others
 
     def image(self, chat, ctime, local_id, packed, xml):
         m = re.search(rb"[0-9a-f]{32}", packed or b"")
@@ -333,6 +343,20 @@ class Source:
         os.remove(base + ".silk"), os.remove(base + ".pcm")
         return {**res, "voice_path": base + ".wav"}
 
+    @staticmethod
+    def quoted(kind, content):
+        """What a quoted message said: its text, or a placeholder instead of an image's / file's XML."""
+        content = re.sub(r"^[\w\-.@]+:\n", "", content or "")  # group quotes carry "wxid:\n"
+        if kind in (None, "", "1"):
+            return content
+        if kind == "49":  # a quoted link / file / quoted reply: its title
+            try:
+                title = ET.fromstring(content).findtext("appmsg/title")
+            except ET.ParseError:
+                title = None
+            return title or "[链接/文件]"
+        return QUOTED.get(kind, "[消息]")
+
     def appmsg(self, xml, sub):
         res = {"app_type": sub}
         try:
@@ -342,7 +366,8 @@ class Source:
                            url=node.findtext("url"), app_type=int(node.findtext("type") or sub))
                 ref = node.find("refermsg")
                 if ref is not None:  # quoted reply
-                    res["quote"] = dict(sender=ref.findtext("displayname"), text=ref.findtext("content"))
+                    res["quote"] = dict(sender=ref.findtext("displayname"),
+                                        text=self.quoted(ref.findtext("type"), ref.findtext("content")))
                     res["text"] = res.pop("title")
         except ET.ParseError:
             res["xml"] = xml

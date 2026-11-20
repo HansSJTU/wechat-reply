@@ -47,8 +47,11 @@ GLOSSARY_SEED = [
     {"wu": "渠", "mandarin": "他/她", "avoid": ["伊"]},
 ]
 TOKENS = os.path.join(ROOT, "models", "wu-u2pp-int8", "tokens.txt")
+# Clips from other sources (cut from videos by stt/bili_clips.py): one JSON line each with key, wav, seconds,
+# source, sender, split (always train), prompt (on-screen Mandarin) and prefill (proposed 余姚话).
+EXTRA = os.path.join(LABEL_DIR, "extra_clips.jsonl")
 UI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "label_ui.html")
-DRAFTERS = ["whisper-wu", "wu-local"]
+DRAFTERS = ["whisper-wu", "wu-local", "wu-ft", "whisper-ft"]
 # done: exported to its split · skip: unclear · bad: broken audio · exclude: labeled or not, kept out of
 # both train and test on purpose (private, a test message to the bot, not representative …)
 STATUSES = ("done", "skip", "bad", "exclude")
@@ -76,8 +79,26 @@ def voices() -> list[dict]:
             seen.add(key)
             out.append({"key": key, "wav": p, "seconds": round((m.get("voice_ms") or 0) / 1000, 1),
                         "time": m.get("time"), "chat": m.get("chat_name") or m.get("chat"),
-                        "sender": m.get("sender_name") or m.get("sender"), "split": split_of(key)})
+                        "sender": m.get("sender_name") or m.get("sender"), "split": split_of(key),
+                        "source": "wechat"})
+    return out + [e for e in extras().values() if e["key"] not in seen and os.path.exists(e["wav"])]
+
+
+def extras() -> dict:
+    """Clips from every data/labels/extra_clips*.jsonl (videos with on-screen text, unlabeled web audio, …)."""
+    import glob
+    out = {}
+    for path in sorted(glob.glob(os.path.join(LABEL_DIR, "extra_clips*.jsonl"))):
+        for line in open(path, encoding="utf-8"):
+            if line.strip():
+                e = json.loads(line)
+                out[e["key"]] = {"split": "train", **e}
     return out
+
+
+def split_for(key: str) -> str:
+    e = extras().get(key)
+    return e["split"] if e else split_of(key)
 
 
 def _load_json(path, default):
@@ -98,6 +119,18 @@ def labels() -> dict:
         for line in open(LABELS, encoding="utf-8"):
             r = json.loads(line)
             out[r["key"]] = r
+    return out
+
+
+def bot_stt() -> dict:
+    """What the bot transcribed while a chat was 开启 (data/voice_stt.jsonl): key -> record (latest)."""
+    out = {}
+    path = os.path.join(ROOT, "data", "voice_stt.jsonl")
+    if os.path.exists(path):
+        for line in open(path, encoding="utf-8"):
+            if line.strip():
+                r = json.loads(line)
+                out[r["key"]] = r
     return out
 
 
@@ -151,7 +184,7 @@ def draft(keys: list[str] | None = None, log=print) -> int:
     with _lock:
         d = drafts()
         todo = [v for v in voices() if (keys is None or v["key"] in keys)
-                and any(n not in d.get(v["key"], {}) for n in DRAFTERS)]
+                and any(n not in d.get(v["key"], {}) for n in DRAFTERS)][::-1]  # page order: newest / top first
         for v in todo:
             a = Audio(v["wav"])
             got = d.setdefault(v["key"], {})
@@ -171,9 +204,10 @@ def draft(keys: list[str] | None = None, log=print) -> int:
         return len(todo)
 
 
-CONVERT_MODEL = "gemini-4-hydrogen"
-# Choices on the labeling page (model id -> label); the first is the default.
-CONVERT_MODELS = {"gemini-4-hydrogen": "Gemini hydrogen", "gpt-6.2-sol": "GPT-6.2 sol"}
+CONVERT_MODEL = "gpt-6.2-sol"
+# Choices on the labeling page (model id -> label); the first is the default. Gemini only when picked by hand.
+CONVERT_MODELS = {"gpt-6.2-sol": "GPT-6.2 sol", "agy:Gemini 4 Neon (High)": "Gemini 4 Neon (agy)",
+                  "gemini-4-hydrogen": "Gemini hydrogen"}
 CONVERT_PROMPT = """你在帮人标注余姚话（浙江余姚的吴语）微信语音，用来训练语音识别模型。
 标注者听了录音，写下了他听到的句子。这句话是混合的：有吴语字、有普通话意思、也有拼音读音（如 lang、o sei、sa ning）。
 
@@ -196,9 +230,6 @@ CONVERT_PROMPT = """你在帮人标注余姚话（浙江余姚的吴语）微信
 def convert(key: str | None, rough: str, with_audio: bool = True, model: str = CONVERT_MODEL) -> dict:
     """Ask an LLM to turn a rough mixed transcription into 余姚话 (说法表 spellings) + Mandarin.
     Only Gemini gets the audio; GPT models work from the text alone."""
-    import base64
-    import httpx
-    from stt import keys
     if model not in CONVERT_MODELS:
         raise ValueError(f"unknown model {model}")
     gemini = model.startswith("gemini")
@@ -212,9 +243,21 @@ def convert(key: str | None, rough: str, with_audio: bool = True, model: str = C
             "；只有录音明显不同时才改，并在 notes 里说明", "").replace("- notes：不确定的地方", "- notes：用词上不确定的地方（不用提没有录音）")
     fields = ("wu", "mandarin", "notes")
     t = time.time()
-    if gemini:
+    out = llm_json(model, prompt, fields, v["wav"] if audio else None)
+    return out | {"seconds": round(time.time() - t, 1), "model": model, "audio": audio}
+
+
+def llm_json(model: str, prompt: str, fields: tuple[str, ...], wav: str | None = None) -> dict:
+    """One structured LLM call returning the string `fields`. Gemini can also get a WAV clip; GPT is text only.
+    "agy:<model name>" runs the Antigravity CLI instead (`agy -p … --model …`, text only, no API key)."""
+    import base64
+    import httpx
+    from stt import keys
+    if model.startswith("agy:"):
+        return _agy_json(model.removeprefix("agy:"), prompt, fields, wav)
+    if model.startswith("gemini"):
         parts = [{"inline_data": {"mime_type": "audio/wav",
-                                  "data": base64.b64encode(open(v["wav"], "rb").read()).decode()}}] if audio else []
+                                  "data": base64.b64encode(open(wav, "rb").read()).decode()}}] if wav else []
         parts.append({"text": prompt})
         schema = {"type": "OBJECT", "properties": {k: {"type": "STRING"} for k in fields}, "required": list(fields)}
         r = httpx.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
@@ -227,6 +270,8 @@ def convert(key: str | None, rough: str, with_audio: bool = True, model: str = C
         text = "".join(p.get("text", "") for p in (cands[0].get("content", {}).get("parts", []) if cands else [])
                        if not p.get("thought"))
     else:
+        if wav:
+            raise ValueError(f"{model} can't take audio")
         schema = {"type": "object", "properties": {k: {"type": "string"} for k in fields},
                   "required": list(fields), "additionalProperties": False}
         r = httpx.post("https://api.openai.com/v1/chat/completions",
@@ -238,8 +283,26 @@ def convert(key: str | None, rough: str, with_audio: bool = True, model: str = C
             raise RuntimeError(f"HTTP {r.status_code}: {' '.join(r.text.split())[:300]}")
         text = r.json()["choices"][0]["message"]["content"]
     out = json.loads(text)
-    return {k: str(out.get(k, "")).strip() for k in fields} | {
-        "seconds": round(time.time() - t, 1), "model": model, "audio": audio}
+    return {k: str(out.get(k, "")).strip() for k in fields}
+
+
+def _agy_json(model: str, prompt: str, fields: tuple[str, ...], wav: str | None) -> dict:
+    import subprocess
+    import tempfile
+    if wav:
+        raise ValueError("agy is used text only")
+    schema = {"type": "object", "properties": {k: {"type": "string"} for k in fields}, "required": list(fields)}
+    with tempfile.TemporaryDirectory() as d:  # empty workspace: nothing for the agent to read
+        r = subprocess.run(["agy", "-p", prompt, "--model", model, "--json-schema", json.dumps(schema),
+                            "--output-format", "json", "--print-timeout", "300s", "--sandbox"],
+                           cwd=d, capture_output=True, text=True, timeout=360)
+    try:
+        out = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"agy: {(r.stderr or r.stdout).strip()[:300]}")
+    if out.get("status") != "SUCCESS" or not isinstance(out.get("structured_output"), dict):
+        raise RuntimeError(f"agy: {out.get('status')} {str(out.get('response'))[:300]}")
+    return {k: str(out["structured_output"].get(k, "")).strip() for k in fields}
 
 
 def normalize(text: str) -> str:
@@ -315,10 +378,35 @@ class Handler(BaseHTTPRequestHandler):
         if self.path in ("/", "/index.html"):
             self._send(200, open(UI, "rb").read(), "text/html; charset=utf-8")
         elif self.path == "/api/items":
-            d, lab, mean = drafts(), labels(), meanings()
-            items = [{**v, "drafts": d.get(v["key"], {}), "label": lab.get(v["key"]),
-                      "meaning_ref": mean.get(v["key"], "")} for v in voices()]
+            d, lab, mean, bot = drafts(), labels(), meanings(), bot_stt()
+
+            def cloud(key):  # the bot's cloud candidates (local ones are drafted here anyway)
+                c = (bot.get(key) or {}).get("candidates") or {}
+                return {f"云·{n}": t for n, t in c.items() if n not in DRAFTERS and t and not t.startswith("✗")}
+
+            items = [{**v, "drafts": {**({"字幕": v["prefill"]} if v.get("prefill") else {}), **d.get(v["key"], {}),
+                                      **cloud(v["key"])},
+                      "label": lab.get(v["key"]),
+                      "meaning_ref": mean.get(v["key"]) or (bot.get(v["key"]) or {}).get("text") or v.get("prompt", "")}
+                     for v in voices()]
             self._json({"items": items, "drafters": DRAFTERS, "drafting": _lock.locked()})
+        elif self.path in ("/chats", "/chats/"):  # chat viewer (stt/chat_view.py)
+            self._send(200, open(os.path.join(os.path.dirname(UI), "chats_ui.html"), "rb").read(),
+                       "text/html; charset=utf-8")
+        elif self.path == "/api/chats":
+            from stt import chat_view
+            self._json({"chats": chat_view.chats()})
+        elif self.path.startswith("/api/chat?"):
+            from urllib.parse import parse_qs, urlparse
+            from stt import chat_view
+            self._json(chat_view.chat(parse_qs(urlparse(self.path).query).get("c", [""])[0]))
+        elif self.path.startswith("/media/"):  # images saved by the bot (data/media only)
+            name = os.path.basename(self.path.removeprefix("/media/"))
+            path = os.path.join(ROOT, "data", "media", name)
+            if not os.path.isfile(path) or not name.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp")):
+                return self._send(404, b"not found", "text/plain")
+            ext = name.rsplit(".", 1)[1].lower()
+            self._send(200, open(path, "rb").read(), "image/" + ("jpeg" if ext == "jpg" else ext))
         elif self.path == "/api/vocab":
             self._json({"chars": "".join(sorted(vocab()))})
         elif self.path == "/api/glossary":
@@ -363,7 +451,7 @@ class Handler(BaseHTTPRequestHandler):
         if r.get("key") not in {v["key"] for v in voices()} or r.get("status") not in STATUSES:
             return self._json({"error": "bad request"}, 400)
         rec = {"key": r["key"], "wu": r.get("wu", "").strip(), "meaning": r.get("meaning", "").strip(),
-               "status": r["status"], "split": split_of(r["key"]), "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+               "status": r["status"], "split": split_for(r["key"]), "at": time.strftime("%Y-%m-%d %H:%M:%S")}
         t = r.get("trim")
         if (isinstance(t, list) and len(t) == 2 and all(isinstance(x, (int, float)) for x in t)
                 and 0 <= t[0] < t[1]):

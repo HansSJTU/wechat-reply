@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "label",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "-q", "stt/label.py", "serve"],
+      "port": 8765
+    }
+  ]
+}
