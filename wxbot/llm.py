@@ -89,6 +89,18 @@ def reply(cfg, history, group=False, extra=None):
     return "" if SILENT in text else text
 
 
+def summarize(cfg, scfg, transcript, members=""):
+    """Sum up a stretch of group chat (mostly transcribed voices). cfg: [llm], scfg: [summary];
+    transcript: plain text lines. Returns the summary text."""
+    system = scfg["prompt"] + ("\n\n群成员：\n" + members if members else "") + "\n" + _now()
+    body = {"model": scfg.get("model") or cfg.get("model", "gpt-5.5"), "instructions": system,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": transcript}]}]}
+    if scfg.get("effort"):
+        body["reasoning"] = {"effort": scfg["effort"]}
+    text, _ = _post({**cfg, "timeout_seconds": scfg.get("timeout_seconds", cfg.get("timeout_seconds", 60))}, body)
+    return _clean(text)
+
+
 DECISIONS_URL = "https://api.openai.com/v1/decisions"
 TO = {"bot": "在跟你说话：叫了你的名字，或接着你上一句追问、纠正你",
       "member": "在跟某个群成员说话：叫了名字或称呼（妈、爸、老公……），回应某人刚说的话，或问只有家里人知道的事",

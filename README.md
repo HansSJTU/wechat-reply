@@ -154,6 +154,11 @@ kqueue on message_*.db/-wal -> source.py -> pipeline.py (one thread per chat)
   - 关闭: record only — no cloud STT, no LLM, nothing leaves the machine. Voices are heard by a local
     model (`[reply] command_stt`: whisper-ft, else wu-ft) only to catch a spoken 开启; that transcript is not kept.
     Voices still reach the labeling page, which drafts them with the local models.
+  - Voice chat summaries (`[summary]`, groups that are 开启): once `min_voices` (5) transcribed voices
+    have piled up since the last summary (or the last 开启) and nobody has sent a voice for `wait_seconds`
+    (10 min; texts in between don't reset it), the bot posts 【聊天总结】 — the topics, who said what, what
+    was decided. The timer runs apart from replies: @s and unprompted turns are handled as usual meanwhile. On demand: "@<me> 总结" or a voice "<name> 总结". A summary
+    covers what came after the previous one, at most `max_hours` back.
   The switch can also be spoken: a voice that is just 开启 / 关闭 (in a group with the bot's name, e.g.
   "莫名其妙 开启").
   Both get a fixed confirmation; the state is kept in `bot.db` and survives restarts.

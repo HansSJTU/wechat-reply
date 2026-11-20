@@ -49,8 +49,10 @@ class Pipeline:
         self.cfg, self.store, self.sender, self.dry_run = cfg, store, sender, dry_run
         self.r = cfg.get("reply", {})
         self.g = cfg.get("group", {})
+        self.s = cfg.get("summary", {})
+        self.summarized = {}  # chat -> time of the last summary made (also covers dry runs and held sends)
         self.workers = {}
-        self.pending = {}  # chat -> (created, text): replies held until a send context exists
+        self.pending = {}  # chat -> (created, text, meta): replies held until a send context exists
         self.lock = threading.Lock()
         self.last_notice = 0.0
         self.last_attach_try = 0.0
@@ -123,8 +125,23 @@ class Pipeline:
     # ---- per-chat worker ---------------------------------------------------
     def _chat_loop(self, chat, q):
         debounce = float(self.r.get("debounce_seconds", 2))
+        last = None  # newest event of this chat: is it a group, is it on
         while True:
-            batch = [q.get()]
+            # idle: the pending voice summary, if any, is due [summary] wait_seconds after the newest voice
+            try:
+                due = self._summary_deadline(chat, last)
+            except Exception as e:  # the add-on must never take the chat's replies down with it
+                log(f"[{chat}] summary check failed: {type(e).__name__}: {e}")
+                due = None
+            try:
+                batch = [q.get(timeout=None if due is None else max(0.0, due - time.time()))]
+            except queue.Empty:
+                try:
+                    self._auto_summary(chat, last)
+                except Exception as e:
+                    log(f"[{chat}] summary failed: {type(e).__name__}: {e}")
+                    self.summarized[chat] = time.time()
+                continue
             self._ingest(chat, batch[0])
             while True:  # a burst of messages gets one reply
                 try:
@@ -133,6 +150,7 @@ class Pipeline:
                     break
                 batch.append(ev)
                 self._ingest(chat, ev)
+            last = batch[-1]
             try:
                 self._respond(chat, batch)
             except Exception as e:
@@ -211,6 +229,69 @@ class Pipeline:
         """[group.members] "<chat>": who is who in this group (names as the messages show them)."""
         return (self.g.get("members") or {}).get(chat, "").strip()
 
+    # ---- voice chat summaries ----------------------------------------------
+    def _summary_since(self, chat, now):
+        """A summary covers what came after the last one, the last 开启, and at most [summary] max_hours."""
+        return max(now - float(self.s.get("max_hours", 12)) * 3600, self.store.history_floor(chat),
+                   self.store.last_summary(chat), self.summarized.get(chat, 0.0))
+
+    def _summary_deadline(self, chat, ev):
+        """[summary] auto, group 开启, at least `min_voices` transcribed voices since the last summary: the
+        summary is due `wait_seconds` after the newest voice (texts in between don't push it back).
+        None when nothing is pending, including voices too old to still be worth it (backlog after downtime)."""
+        if not ev or not ev.get("is_group") or not self.s.get("auto", True) or not self._on(chat, ev):
+            return None
+        n, newest = self.store.voices(chat, self._summary_since(chat, time.time()))
+        if n < int(self.s.get("min_voices", 5)):
+            return None
+        due = newest + float(self.s.get("wait_seconds", 600))
+        return None if time.time() - due > float(self.r.get("max_age_seconds", 600)) else due
+
+    def _auto_summary(self, chat, ev):
+        """The summary timer went off: post it unless the bot is paused. A skipped one is not retried."""
+        now = time.time()
+        if self._summary_deadline(chat, ev) is None:  # switched off meanwhile, or a manual one covered it
+            return
+        stop = os.path.exists(os.path.join(ROOT, self.r.get("stop_file", "data/STOP")))
+        busy = self.store.replies_since(chat, now - 60) >= int(self.r.get("max_per_minute", 6))
+        if stop or busy:
+            log(f"[{chat}] summary skipped: {'stop file present' if stop else 'rate limit reached'}")
+            self.summarized[chat] = now
+            return
+        self._summarize(chat, now)
+
+    def _summarize(self, chat, now, manual=False):
+        """Post a summary of the group chat since the last one (mostly transcribed voices)."""
+        since = self._summary_since(chat, now)
+        rows = self.store.history(chat, since)
+        said = [h for h in rows if h["role"] == "user"]
+        if len(said) < (2 if manual else 1):  # manual: the request itself is one of them
+            if manual:
+                self._deliver(chat, "上次总结之后还没有新的聊天，暂时没什么可总结的。")
+            return
+        voices, _ = self.store.voices(chat, since)
+        me = (self.g.get("names") or ["机器人"])[0]
+        hm = lambda t: time.strftime("%H:%M", time.localtime(t))
+        transcript = "\n".join(f"[{hm(h['time'])}] " + (f"{me}（机器人）：" if h["role"] == "assistant" else "")
+                               + h["text"] for h in rows)
+        # the next summary starts after the newest line covered here (not at send time: voices that land while
+        # the LLM writes belong to the next one); set even if the LLM or the send fails, so no retry storm
+        upto = rows[-1]["time"] + 0.001  # history() is inclusive
+        self.summarized[chat] = upto
+        t = time.monotonic()
+        try:
+            text = llm.summarize(self.cfg["llm"], self.s, transcript, self._members(chat))
+        except Exception as e:
+            log(f"[{chat}] summary failed: {type(e).__name__}: {e}")
+            return
+        log(f"[{chat}] summary of {len(said)} messages ({voices} voices) {time.monotonic() - t:.1f}s "
+            f"-> {text[:80]!r}" + (" (asked)" if manual else ""))
+        if not text:
+            return
+        head = (f"【聊天总结】{hm(said[0]['time'])}–{hm(said[-1]['time'])}，"
+                + (f"{voices} 条语音" if voices else f"{len(said)} 条消息"))
+        self._deliver(chat, head + "\n" + text, summary=voices, upto=upto)
+
     # ---- unprompted group turns --------------------------------------------
     @staticmethod
     def _eligible(ev):
@@ -288,6 +369,7 @@ class Pipeline:
         off_words = self.r.get("off_words", self.r.get("mute_words", ["关闭"]))
         on_words = self.r.get("on_words", self.r.get("unmute_words", ["开启", "打开"]))
         names = self.g.get("names") or []
+        summary_words = self.s.get("words", ["总结", "总结一下"])
         for ev in live:
             if ev.get("type") == "text":
                 text = ev.get("text") or ""
@@ -312,9 +394,22 @@ class Pipeline:
                 cmd = ("off", ev)
             elif word in on_words:
                 cmd = ("on", ev)
+            elif word in summary_words and ev.get("is_group"):  # 1:1 chats just ask the LLM
+                cmd = ("summary", ev)
         if not cmd:
             return False
         kind, ev = cmd
+        if kind == "summary":
+            stop = os.path.exists(os.path.join(ROOT, self.r.get("stop_file", "data/STOP")))
+            log(f"[{chat}] summary asked by {ev.get('sender_name') or ev.get('sender')}")
+            if not fresh or stop:
+                return True
+            if not self._on(chat, ev):
+                name = names[0] if names else "我的名字"
+                self._deliver(chat, f"现在是关闭状态，语音没有转成文字，没法总结。@我 说「开启」，或者发语音说「{name} 开启」。")
+            elif self.store.replies_since(chat, time.time() - 60) < int(self.r.get("max_per_minute", 6)):
+                self._summarize(chat, time.time(), manual=True)
+            return True
         on, group = kind == "on", ev.get("is_group")
         self.store.set_enabled(chat, on, ev["time"])
         if on:  # the LLM's context starts here: nothing from while it was off; WeChat times are whole
@@ -334,7 +429,7 @@ class Pipeline:
         return True
 
     # ---- sending -----------------------------------------------------------
-    def _deliver(self, chat, text, auto=None):
+    def _deliver(self, chat, text, auto=None, **meta):
         if self.dry_run:
             log(f"[{chat}] (dry run) would send {text!r}")
             return
@@ -342,14 +437,14 @@ class Pipeline:
             r = self.sender.send_text(chat, text)
         except NotReady as e:
             with self.lock:
-                self.pending[chat] = (time.time(), text)
+                self.pending[chat] = (time.time(), text, {"auto": auto, **meta})
             log(f"[{chat}] held: {e}")
             self._notice("微信机器人有待发的回复：请在调试版微信里手动发一条文字")
             return
         except Exception as e:  # ambiguous: never retry, a duplicate is worse than a gap
             log(f"[{chat}] send failed, not retried: {type(e).__name__}: {e}")
             return
-        meta = {"auto": auto} if auto else {}
+        meta = {**({"auto": auto} if auto else {}), **{k: v for k, v in meta.items() if v is not None}}
         self.store.add(chat, "assistant", text, client_msg_id=r["clientMessageId"], task_id=r.get("taskId"), **meta)
         log(f"[{chat}] -> sent (task {r.get('taskId')}, result {r.get('result')})")
 
@@ -357,11 +452,11 @@ class Pipeline:
         ttl = float(self.r.get("pending_ttl_seconds", 300))
         with self.lock:
             items, self.pending = self.pending, {}
-        for chat, (created, text) in items.items():
+        for chat, (created, text, meta) in items.items():
             if time.time() - created > ttl:
                 log(f"[{chat}] dropped a held reply ({time.time() - created:.0f}s old)")
                 continue
-            self._deliver(chat, text)
+            self._deliver(chat, text, **meta)
 
     def _notice(self, message):
         if time.time() - self.last_notice < 600:

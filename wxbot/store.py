@@ -93,6 +93,22 @@ class Store:
             return self.db.execute("select count(*) from messages where chat = ? and role = 'assistant' "
                                    "and time >= ?", (chat, since)).fetchone()[0]
 
+    def voices(self, chat, since):
+        """Transcribed voices ("[语音] …") received after `since`: (count, time of the newest or 0)."""
+        with self.lock:
+            n, newest = self.db.execute("select count(*), max(time) from messages where chat = ? and role = 'user' "
+                                        "and time > ? and json_extract(meta, '$.type') = 'voice' "
+                                        "and instr(text, '[语音] ') > 0", (chat, since)).fetchone()
+        return n, newest or 0.0
+
+    def last_summary(self, chat):
+        """Where the bot's last chat summary ended (meta.upto, just after the newest line it covered), 0 if none."""
+        with self.lock:
+            row = self.db.execute("select max(coalesce(json_extract(meta, '$.upto'), time)) from messages "
+                                  "where chat = ? and role = 'assistant' and json_extract(meta, '$.summary') "
+                                  "is not null", (chat,)).fetchone()
+        return row[0] or 0.0
+
     def auto_replies(self, chat, since):
         """Unprompted group replies (meta.auto = the judge's kind) since `since`: [(time, kind)], oldest first."""
         with self.lock:

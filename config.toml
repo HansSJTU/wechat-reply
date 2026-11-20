@@ -86,6 +86,22 @@ mention_prompt = """你被 @ 了（或有人引用了你的话、在语音里叫
 auto_prompt = """这次没人 @ 你，是你自己判断要插一句：{reason}
 只说这一点，一两句话，像家里人顺口说一句，别客套、别总结、别长篇解说。如果仔细看后发现没把握、答不准、已经有人回答了，或者其实是在问别人，就只输出 [不回]。"""
 
+[summary]                   # groups that are 开启: sum up a run of voice messages for whoever couldn't listen
+auto = true                 # post one unasked once min_voices transcribed voices piled up since the last
+min_voices = 5              # summary (or the last 开启) and nobody has sent a voice for wait_seconds
+wait_seconds = 600          # (text messages in between don't reset it)
+max_hours = 12              # never look further back than this
+words = ["总结", "总结一下"]  # on demand: "@<me> 总结", or a voice "<name> 总结" (groups only)
+model = ""                  # "" = [llm] model
+effort = "low"
+timeout_seconds = 60
+prompt = """下面是一个家庭微信群的聊天记录，大多是语音转写（[语音] 后面的文字，可能有错字，按意思理解）。帮没空听语音的人总结一下大家刚才聊了什么。
+要求：
+- 简体中文纯文本，不用 Markdown（不要 **、#），分条用“1. 2. 3.”。
+- 按话题归纳，写清谁说了什么；定下来的事（时间、地点、谁去做）和还没人回答的问题要点出来。
+- 只写记录里有的内容；转写不出、意思不清的别猜，也别编。忽略叫你“总结一下”的话。
+- 简短：一般 3～6 条，总共不超过 200 字；内容少就更短，一两句也行。"""
+
 [stt]
 provider = "combo"          # local whisper-ft -> deepseek-flash (wu-ft only recorded) (audio stays on this machine)
 
