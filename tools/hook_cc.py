@@ -17,6 +17,8 @@ import time
 
 import lldb
 
+from private_io import create_private  # same directory; `command script import` puts it on sys.path
+
 OUT = None
 SEEN = set()
 _LOCK = threading.Lock()
@@ -71,11 +73,13 @@ def on_pbkdf(frame, bp_loc, internal_dict):
 def _open_out(path):
     global OUT
     OUT = path
-    open(OUT, "a").close()
-    uid, gid = os.environ.get("SUDO_UID"), os.environ.get("SUDO_GID")
-    if uid and gid:
-        os.chown(OUT, int(uid), int(gid))
-    os.chmod(OUT, 0o600)
+    fd = create_private(OUT)  # 0600 from creation: key material is appended to it
+    try:
+        uid, gid = os.environ.get("SUDO_UID"), os.environ.get("SUDO_GID")
+        if uid and gid:
+            os.fchown(fd, int(uid), int(gid))
+    finally:
+        os.close(fd)
 
 
 def hookrun(debugger, command, result, internal_dict):

@@ -14,6 +14,8 @@ import json
 import os
 import struct
 
+from private_io import write_private_json  # tools/, the script's own directory
+
 PAGE, RESERVE = 4096, 80
 
 
@@ -42,10 +44,16 @@ aes, pbkdf = set(), []
 with open(a.captures) as f:
     for line in f:
         parts = line.rstrip("\n").split("\t")
-        if parts[0] == "aes":
-            aes.add(bytes.fromhex(parts[1]))
-        elif parts[0] == "pbkdf":
-            pbkdf.append((bytes.fromhex(parts[1]), bytes.fromhex(parts[2]), int(parts[3])))
+        if parts[0] == "aes" and len(parts) >= 2:
+            try:
+                aes.add(bytes.fromhex(parts[1]))
+            except ValueError:
+                continue
+        elif parts[0] == "pbkdf" and len(parts) >= 4:
+            try:
+                pbkdf.append((bytes.fromhex(parts[1]), bytes.fromhex(parts[2]), int(parts[3])))
+            except ValueError:
+                continue
 print(f"databases: {len(dbs)}; captured aes keys: {len(aes)}, pbkdf calls: {len(pbkdf)}")
 
 found = {}
@@ -86,7 +94,5 @@ prev.setdefault("databases", {}).update(found)
 if raw:
     prev["raw_key"] = raw[0].hex()
     prev["kdf"] = {"alg": "pbkdf2-sha512", "rounds": raw[1]}
-with open(a.out, "w") as f:
-    json.dump(prev, f, indent=2)
-os.chmod(a.out, 0o600)
+write_private_json(a.out, prev)
 print(f"wrote {a.out}")

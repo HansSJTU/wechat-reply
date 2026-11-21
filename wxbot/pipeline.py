@@ -338,12 +338,13 @@ class Pipeline:
         elif d["to"] != "bot":
             cool, share_cool = (float(g.get("cooldown_minutes", 0)) * 60,
                                 float(g.get("share_cooldown_minutes", 0)) * 60)
+            auto_kind = d.get("rule") or d["kind"]
             recent = self.store.auto_replies(chat, now - max(cool, share_cool))
             last = [t for t, k in recent if k != "bot"]
             shares = [t for t, k in recent if k == "share"]
             if last and now - last[-1] < cool:
                 why = f"cooldown: spoke up unasked {(now - last[-1]) / 60:.0f} min ago"
-            elif d["kind"] == "share" and shares and now - shares[-1] < share_cool:
+            elif auto_kind == "share" and shares and now - shares[-1] < share_cool:
                 why = f"share cooldown: {(now - shares[-1]) / 60:.0f} min ago"
         self._record(chat, live, d, why)
         if why and d["reply"]:

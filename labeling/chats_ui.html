@@ -214,7 +214,7 @@ function decCard(dc, c) {
 
 function msg(i, c) {
   const right = i.bot || i.self;
-  const who = i.bot ? "莫名其妙" : i.self ? "本账号（手动）" : i.sender;
+  const who = i.bot ? (c.bot_name || "机器人") : i.self ? "本账号（手动）" : i.sender;
   let inner;
   if (i.type === "voice") {
     const w = Math.min(260, 70 + (i.seconds || 0) * 6);
@@ -235,13 +235,17 @@ async function loadChat(scroll) {
   if (!sel) return;
   const c = await fetch("/api/chat?c=" + encodeURIComponent(sel)).then(r => r.json());
   const sig = JSON.stringify([c.on, c.items.length, c.items.filter(i => i.mandarin || i.label).length,
-    c.items.filter(i => i.decision).length]);
+    c.items.filter(i => i.decision).length, c.items.filter(i => i.decision?.skipped).length]);
   if (sig === last && !scroll) return;
   last = sig;
+  const bot = c.bot_name || "机器人";
   const lastSw = [...c.items].reverse().find(i => i.kind === "switch");
+  const modeDesc = c.is_group
+    ? (c.group_auto ? `群：@${esc(bot)} 必回，也会酌情主动插话` : `群：@${esc(bot)} 才回复`)
+    : "私聊：每条都回复";
   $("#head").innerHTML = `<div class="row"><span class="t">${esc(c.name)}</span>
       <span class="pill ${c.on ? "on" : "off"}">${c.on ? "开启" : "关闭"}</span>
-      <span class="sub">${c.is_group ? "群：@莫名其妙 才回复" : "私聊：每条都回复"} · 发${c.is_group ? "「@莫名其妙 开启/关闭」" : "「开启/关闭」"}切换
+      <span class="sub">${modeDesc} · 发${c.is_group ? `「@${esc(bot)} 开启/关闭」` : "「开启/关闭」"}切换
       ${lastSw ? ` · 最近一次切换：${day(lastSw.time)} ${hm(lastSw.time)}，${esc(lastSw.by.replace(/[（）]/g, ""))}${lastSw.on ? "开启" : "关闭"}` : ""}</span></div>
     ${strip(c)}
     <div class="legend"><span><i style="background:var(--on)"></i>开启：语音转文字、会回复</span><span><i style="background:var(--off)"></i>关闭：只记录</span><span>竖线：切换</span>

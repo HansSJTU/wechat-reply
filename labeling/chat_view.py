@@ -20,6 +20,7 @@ from stt.paths import DATA
 from wxbot.config import load_config, switch_words
 
 MENTION = re.compile(r"@[^\s ]+[\s ]*")
+FILLER = " \u2005。.!！~～，,、？?：:"  # around a spoken 开启 / 关闭 (matches wxbot/pipeline.py)
 
 
 def _db():
@@ -35,15 +36,25 @@ def _default_on(cfg, chat, name):
     return False
 
 
-def _command(ev, on_words, off_words):
-    if ev.get("type") != "text" or ev.get("is_self"):
+def _command(ev, on_words, off_words, names=(), voice_text=None):
+    if ev.get("is_self"):
         return None
-    text = ev.get("text") or ""
-    if ev.get("is_group"):
-        if not ev.get("mentions_me"):
+    if ev.get("type") == "text":
+        text = ev.get("text") or ""
+        if ev.get("is_group"):
+            if not ev.get("mentions_me"):
+                return None
+            text = MENTION.sub("", text)
+        word = text.strip(" 。.!！~～")
+    elif ev.get("type") == "voice" and voice_text:
+        text = voice_text
+        if ev.get("is_group") and not any(n in text for n in names):
             return None
-        text = MENTION.sub("", text)
-    word = text.strip(" 。.!！~～")
+        for n in names:
+            text = text.replace(n, " ")
+        word = text.strip(FILLER)
+    else:
+        return None
     return "on" if word in on_words else "off" if word in off_words else None
 
 
@@ -152,21 +163,39 @@ def chat(chat_id: str) -> dict:
             switch_row = _switch_row(con, chat_id)
         finally:
             con.close()
+    g = cfg.get("group") or {}
+    names = g.get("names") or []
+    bot_name = names[0] if names else "机器人"
+    bot_sender = f"{bot_name}（机器人）" if bot_name != "机器人" else "机器人"
     decisions = _decisions(chat_id, msgs)
     name = msgs[0].get("chat_name") if msgs else chat_id
     is_group = chat_id.endswith("@chatroom")
     items, switches = [], []
+    # The bot read a spoken 开启 / 关闭 from one transcript, chosen by the chat's state at the time: the STT
+    # result while on, the first ready [reply] command_stt model while off. Follow the same choice here.
+    first_mode = next((m["reply"] for m in msgs if m.get("reply")), None)
+    live_on = (first_mode in ("always", "mention") if first_mode is not None   # older messages lack "reply"
+               else _default_on(cfg, chat_id, name))
+    command_stt = (cfg.get("reply") or {}).get("command_stt", ["whisper-ft", "wu-ft"])
+    command_stt = [command_stt] if isinstance(command_stt, str) else command_stt
     for m in msgs:
+        if switch_row and m["time"] > switch_row[1]:  # the latest switch (also one set outside the chat)
+            live_on = bool(switch_row[0])
         it = {"kind": "msg", "time": m["time"], "type": m["type"], "sender": m.get("sender_name") or m.get("sender"),
               "self": m.get("is_self", False), "text": m.get("text"), "mentions_me": m.get("mentions_me", False)}
+        heard = None
         if m["type"] == "voice" and m.get("voice_path"):
             key = os.path.basename(m["voice_path"])
             r, lab = stt.get(key), labels.get(key)
             old = re.sub(r"^.*?\[语音\]\s*", "", seen.get(m["local_id"], "")) if "[语音] " in seen.get(m["local_id"], "") else ""
+            local_d = drafts.get(key, {})
+            mandarin = (r and r.get("text")) or old or None
             it.update(key=key, seconds=round((m.get("voice_ms") or 0) / 1000, 1),
-                      mandarin=(r and r.get("text")) or old or None, stt_error=r and r.get("error"),
-                      candidates=(r or {}).get("candidates") or {}, local=drafts.get(key, {}),
+                      mandarin=mandarin, stt_error=r and r.get("error"),
+                      candidates=(r or {}).get("candidates") or {}, local=local_d,
                       label=lab and {"wu": lab.get("wu"), "meaning": lab.get("meaning"), "status": lab.get("status")})
+            # while on, the bot read `mandarin`: voice_stt.jsonl, or bot.db for voices from before that file
+            heard = mandarin if live_on else next((local_d[n] for n in command_stt if local_d.get(n)), None)
         if m["type"] == "image" and m.get("image_path"):
             it["image"] = os.path.basename(m["image_path"])
         if m.get("local_id") in decisions:
@@ -174,19 +203,23 @@ def chat(chat_id: str) -> dict:
         if m["type"] == "app":
             it["text"] = m.get("text") or m.get("title") or "[链接/文件]"
         items.append(it)
-        cmd = _command(m, on_words, off_words)
+        cmd = _command(m, on_words, off_words, names, heard)
         if cmd:
-            switches.append({"kind": "switch", "time": m["time"], "on": cmd == "on",
+            live_on = cmd == "on"
+            switches.append({"kind": "switch", "time": m["time"], "on": live_on,
                              "by": m.get("sender_name") or m.get("sender")})
     for t, role, text in bot_msgs:
-        items.append({"kind": "msg", "time": t, "type": "text", "sender": "莫名其妙（机器人）", "bot": True,
+        items.append({"kind": "msg", "time": t, "type": "text", "sender": bot_sender, "bot": True,
                       "text": text})
     if switch_row and not any(abs(s["time"] - switch_row[1]) < 5 for s in switches):  # set outside a chat command
         switches.append({"kind": "switch", "time": switch_row[1], "on": bool(switch_row[0]), "by": "（直接设置）"})
     switches.sort(key=lambda s: s["time"])
-    # state periods for the strip: from the first message, default state, then each switch
+    # state periods for the strip: from the first message, initial state, then each switch
     start = min([i["time"] for i in items] + [s["time"] for s in switches], default=0)
-    state = _default_on(cfg, chat_id, name) if not switches else not switches[0]["on"]
+    if first_mode is not None:
+        state = first_mode in ("always", "mention")
+    else:
+        state = _default_on(cfg, chat_id, name) if not switches else not switches[0]["on"]
     periods, t0 = [], start
     for s in switches:
         if s["on"] != state:
@@ -194,9 +227,9 @@ def chat(chat_id: str) -> dict:
             t0, state = s["time"], s["on"]
     current = bool(switch_row[0]) if switch_row else state
     periods.append({"from": t0, "to": None, "on": state})
-    g = cfg.get("group") or {}
     timeline = sorted(items + switches, key=lambda x: (x["time"], x["kind"] != "switch"))
     return {"chat": chat_id, "name": name, "is_group": is_group, "on": current, "periods": periods,
+            "bot_name": bot_name, "group_auto": bool(g.get("auto", False)),
             "threshold": float(g.get("reply_threshold", 0.75)), "fact_thresholds": g.get("fact_thresholds") or {},
             "voice_threshold": float(g.get("voice_reply_threshold", 0.97)),
             "items": timeline}

@@ -17,23 +17,36 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "wxbot"))
-from wxcrypto import aes_ecb_decrypt, decrypt_image, image_kind, parse_v2  # noqa: E402
+from wxcrypto import V2_MAGIC, aes_ecb_decrypt, decrypt_image, image_kind, parse_v2  # noqa: E402
+
+from private_io import write_private_json  # noqa: E402  (tools/, the script's own directory)
 
 DOCS = os.path.expanduser("~/Library/Containers/com.tencent.xinWeChat/Data/Documents")
 KEYS = os.path.join(HERE, "..", "secrets", "wechat_keys.json")
 
-acc = glob.glob(DOCS + "/xwechat_files/wxid_*/")[0]
+accs = glob.glob(DOCS + "/xwechat_files/wxid_*/")
+if not accs:
+    sys.exit(f"no WeChat account under {DOCS}")
+acc = max(accs, key=lambda p: os.stat(p + "db_storage").st_mtime)
 folder = os.path.basename(acc.rstrip("/"))
 wxids = {folder, re.sub(r"_[0-9a-f]{4}$", "", folder)}
 uins = set()
 for p in glob.glob(DOCS + "/app_data/net/kvcomm/*"):
     uins.update(re.findall(r"_(\d{6,12})_", "_" + os.path.basename(p) + "_"))
 
-samples = [p for p in glob.glob(acc + "msg/attach/**/*.dat", recursive=True)]
-sample = next((p for p in samples if parse_v2(open(p, "rb").read())), None)
+sample = None
+for p in glob.glob(acc + "msg/attach/**/*.dat", recursive=True):
+    try:
+        with open(p, "rb") as f:
+            if f.read(len(V2_MAGIC)) == V2_MAGIC:
+                sample = p
+                break
+    except OSError:
+        continue
 if not sample:
     sys.exit("need at least one received image (.dat V2) under msg/attach")
-data = open(sample, "rb").read()
+with open(sample, "rb") as f:
+    data = f.read()
 aes_part = parse_v2(data)[0]
 
 for uin in sorted(uins):
@@ -45,9 +58,7 @@ for uin in sorted(uins):
             with open(KEYS) as f:
                 keys = json.load(f)
             keys["image"] = {"aes_key": key.decode(), "xor_key": xor}
-            with open(KEYS, "w") as f:
-                json.dump(keys, f, indent=2)
-            os.chmod(KEYS, 0o600)
+            write_private_json(KEYS, keys)
             print(f"image key verified ({image_kind(img)}), saved to {os.path.normpath(KEYS)}")
             sys.exit()
 sys.exit("no uin/wxid combination decrypted the sample")

@@ -20,7 +20,6 @@ create table if not exists messages (
   meta text
 );
 create index if not exists messages_chat_time on messages (chat, time);
-create table if not exists mutes (chat text primary key, until real not null);
 create table if not exists history_floor (chat text primary key, since real not null);
 create table if not exists switches (chat text primary key, on_ integer not null, at real not null);
 """
@@ -55,17 +54,6 @@ class Store:
             rows = self.db.execute("select id, time, role, text, image_path from messages "
                                    "where chat = ? and time >= ? order by id", (chat, since)).fetchall()
         return [dict(id=rid, time=t, role=r, text=x, image_path=i) for rid, t, r, x, i in rows]
-
-    def muted_until(self, chat):
-        with self.lock:
-            row = self.db.execute("select until from mutes where chat = ?", (chat,)).fetchone()
-        return row[0] if row else 0.0
-
-    def set_mute(self, chat, until):
-        """until = 0 unmutes."""
-        with self.lock:
-            self.db.execute("insert into mutes values (?, ?) on conflict(chat) do update set until = excluded.until",
-                            (chat, until))
 
     def enabled(self, chat):
         """True / False once the chat was switched with 开启 / 关闭; None before (config decides)."""

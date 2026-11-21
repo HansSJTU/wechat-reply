@@ -216,6 +216,7 @@ The native sender is GPL-3.0-or-later; see `tools/NATIVE_SEND_NOTICE.md`.
 | `labeling/` | labeling page (+ chat viewer) and builders of extra training clips | `labeling/README.md` |
 | `finetune/` | fine-tuning and evaluating the local Wu models | `finetune/README.md` |
 | `tools/`, `scripts/` | key capture, debuggable WeChat copy, LaunchAgent launchers | this file |
+| `tests/` | offline unit tests (`uv run tests/run.py`) | — |
 | `docs/` | measurements behind the current STT choices | `docs/stt-experiments.md` |
 
 API keys for all of them: `secrets/stt_keys.toml` (template `examples/stt_keys.toml`).
