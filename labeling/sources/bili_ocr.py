@@ -5,7 +5,7 @@
 # ///
 """Timed on-screen text from a video with macOS Vision OCR (local, no network).
 
-  uv run stt/bili_ocr.py VIDEO --crop x,y,w,h [--fps 5] > segments.jsonl
+  uv run labeling/sources/bili_ocr.py VIDEO --crop x,y,w,h [--fps 5] > segments.jsonl
 
 Samples the crop at --fps, OCRs only when the bright text pixels change, and prints one JSON line per
 stretch of unchanged text: {"start", "end", "lines": [...]} (seconds; lines top to bottom).

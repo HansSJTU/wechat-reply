@@ -1,13 +1,13 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["numpy", "sherpa-onnx", "httpx", "websockets>=13"]
+# dependencies = ["numpy", "sherpa-onnx"]
 # ///
 """Cut downloaded 余姚话 / 慈溪话 audio without transcripts into utterance clips for the labeling page.
 
-  uv run stt/unlabeled_clips.py build [--max-per-file 60]   clips → data/bili/unlabeled/clips/, items.jsonl
-  uv run stt/unlabeled_clips.py publish                      → data/labels/extra_clips_web.jsonl (page tab 网络)
-  uv run stt/unlabeled_clips.py words                        word-list readings → data/labels/extra_clips_words.jsonl
+  uv run labeling/sources/unlabeled_clips.py build [--max-per-file 60]   clips → data/bili/unlabeled/clips/, items.jsonl
+  uv run labeling/sources/unlabeled_clips.py publish                    → data/labels/extra_clips_web.jsonl (page tab 网络)
+  uv run labeling/sources/unlabeled_clips.py words                    word-list readings → data/labels/extra_clips_words.jsonl
                                                              (page tab 词组; see WORD_SOURCES)
 
 Input: data/bili/unlabeled/{yuyao,cixi}/*.m4a and manifest.jsonl (one line per file: file, title, uploader,
@@ -23,31 +23,22 @@ The labeling server then drafts the kept clips with all local models. All clips 
 import argparse
 import json
 import os
-import subprocess
 import sys
-import wave
 
 import numpy as np
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from labeling.sources.wavio import HOP, RATE, frame_rms, read_pcm, to_wav, write_wav  # noqa: E402
+from stt.paths import LABELS, ROOT  # noqa: E402
+
 DIR = os.path.join(ROOT, "data", "bili", "unlabeled")
 CLIPS = os.path.join(DIR, "clips")
 ITEMS = os.path.join(DIR, "items.jsonl")
-OUT = os.path.join(ROOT, "data", "labels", "extra_clips_web.jsonl")
-RATE = 16000
-HOP = RATE // 100  # 10 ms
+OUT = os.path.join(LABELS, "extra_clips_web.jsonl")
 
 
 def to_pcm(path: str) -> np.ndarray:
-    wav = os.path.join(DIR, "wav", os.path.splitext(os.path.basename(path))[0] + ".wav")
-    if not os.path.exists(wav):
-        os.makedirs(os.path.dirname(wav), exist_ok=True)
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", path, "-ac", "1", "-ar", str(RATE), wav + ".tmp.wav"],
-                       check=True)
-        os.replace(wav + ".tmp.wav", wav)
-    with wave.open(wav) as w:
-        return np.frombuffer(w.readframes(w.getnframes()), np.int16)
+    return read_pcm(to_wav(path, os.path.join(DIR, "wav", os.path.splitext(os.path.basename(path))[0] + ".wav")))
 
 
 def utterances(x: np.ndarray, max_len: float = 12.0, min_len: float = 1.0, bridge: float = 0.6,
@@ -56,7 +47,7 @@ def utterances(x: np.ndarray, max_len: float = 12.0, min_len: float = 1.0, bridg
     n = len(x) // HOP
     if n < 10:
         return []
-    rms = np.sqrt((x[:n * HOP].astype(np.float64).reshape(n, HOP) ** 2).mean(1))
+    rms = frame_rms(x)
     thr = max(np.percentile(rms, 99) * 0.0316, 3 * np.percentile(rms, 10), 30.0)
     loud = rms > thr
     runs, i = [], 0
@@ -141,12 +132,7 @@ def build(max_per_file: int):
         for k, a, b in kept_segs:
             key = f"{prefix}_{stem}_{k:04d}.wav"
             dst = os.path.join(CLIPS, key)
-            with wave.open(dst + ".tmp", "wb") as w:
-                w.setnchannels(1)
-                w.setsampwidth(2)
-                w.setframerate(RATE)
-                w.writeframes(x[a:b].tobytes())
-            os.replace(dst + ".tmp", dst)
+            write_wav(dst, x[a:b])
             sec = (b - a) / RATE
             total += sec
             items.append({"key": key, "wav": dst, "seconds": round(sec, 1), "source": "web",
@@ -169,13 +155,12 @@ WORD_SOURCES = [
     ("data/bili/unlabeled/cixi/BV1Ps4y1f7Wk_p01.m4a", "w_cxda", "慈溪 · 方言视频档案", None),
     ("data/bili/unlabeled/cixi/BV1Tr4y1P77K_p01.m4a", "w_cxdb", "慈溪 · 慈城话 vs 浒山话 对比", None),
 ]
-OUT_WORDS = os.path.join(ROOT, "data", "labels", "extra_clips_words.jsonl")
+OUT_WORDS = os.path.join(LABELS, "extra_clips_words.jsonl")
 
 
 def ocr_hints(path: str) -> list[tuple[float, float, str]]:
     """On-screen prompts (deduplicated OCR) as (start, end, text)."""
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from bili_clips import group_subtitles
+    from labeling.sources.bili_clips import group_subtitles
     rows = [json.loads(l) for l in open(os.path.join(ROOT, path), encoding="utf-8")]
     return [(g["start"], g["end"], g["text"]) for g in group_subtitles(rows, [(0, None, "prompt", 0.0)])]
 
@@ -190,12 +175,7 @@ def words():
         for k, (a, b) in enumerate(segs, 1):
             key = f"{prefix}_{k:04d}.wav"
             dst = os.path.join(CLIPS, key)
-            with wave.open(dst + ".tmp", "wb") as w:
-                w.setnchannels(1)
-                w.setsampwidth(2)
-                w.setframerate(RATE)
-                w.writeframes(x[a:b].tobytes())
-            os.replace(dst + ".tmp", dst)
+            write_wav(dst, x[a:b])
             t0, t1 = a / RATE, b / RATE
             # the prompt shown around then (subtitles are only roughly in sync: a hint, not the label)
             near = [t for s0, s1, t in hints if s0 <= t1 + 2 and s1 >= t0 - 2]

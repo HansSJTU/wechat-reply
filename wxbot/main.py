@@ -5,27 +5,10 @@ import signal
 import sys
 import threading
 import time
-import tomllib
 
+from .config import load_config
 from .log import log
 from .paths import DATA, ROOT
-
-
-def _merge(base, over):
-    for k, v in over.items():
-        base[k] = _merge(base[k], v) if isinstance(v, dict) and isinstance(base.get(k), dict) else v
-    return base
-
-
-def load_config(path):
-    """`path`, then `config.local.toml` next to it (gitignored: chats, location, prompts) on top."""
-    with open(path, "rb") as f:
-        cfg = tomllib.load(f)
-    local = os.path.join(os.path.dirname(os.path.abspath(path)), "config.local.toml")
-    if os.path.exists(local):
-        with open(local, "rb") as f:
-            cfg = _merge(cfg, tomllib.load(f))
-    return cfg
 
 
 def run(cfg, dry_run):

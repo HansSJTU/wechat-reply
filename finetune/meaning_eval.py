@@ -4,7 +4,7 @@
 # dependencies = [
 #   "wenet @ https://github.com/wenet-e2e/wenet/archive/be6ad97fdb512589df113042f7ff3a29d392fb38.tar.gz",
 #   "torch==2.5.1", "torchaudio==2.5.1", "numpy<2", "pyyaml", "openai-whisper", "librosa",
-#   "httpx", "websockets>=13",  # stt/ (refine.py) is imported, whose package imports the API clients
+#   "httpx",  # stt/refine.py
 # ]
 # ///
 """Judge models by what the bot does with their output: transcript → deepseek-flash (stt/refine.py, the same
@@ -30,12 +30,14 @@ import os
 import re
 import sys
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-EVAL = os.path.join(ROOT, "data", "labels", "eval")
-LABELS = os.path.join(ROOT, "data", "labels", "labels.jsonl")
-TEST = os.path.join(ROOT, "data", "labels", "wenet", "test.jsonl")
+from stt.cer import edits  # noqa: E402
+from stt.paths import LABELS as LABEL_DIR  # noqa: E402
+
+EVAL = os.path.join(LABEL_DIR, "eval")
+LABELS = os.path.join(LABEL_DIR, "labels.jsonl")
+TEST = os.path.join(LABEL_DIR, "wenet", "test.jsonl")
 
 
 def test_items() -> list[dict]:
@@ -202,7 +204,7 @@ def judge(names: list[str], llm: str = "deepseek", runs: int = 1):
                     if r == 0:
                         detail.append((it["key"], n, " / ".join(json.loads(job(n, it["key"], 0))), out, v))
                 per_run.append(sum(s) / (2 * len(s)))
-            e = sum(u2pp.edits(hyps[n].get(it["key"], ""), it["txt"]) for it in its) if "+" not in n else None
+            e = sum(edits(hyps[n].get(it["key"], ""), it["txt"]) for it in its) if "+" not in n else None
             cer = f"CER {e / sum(len(it['txt']) for it in its):5.1%}" if e is not None else "CER   —  "
             spread = f" ({min(per_run):.0%}–{max(per_run):.0%})" if runs > 1 else ""
             cells.append(f"{gname} {len(its):2d}: score {sum(per_run) / runs:5.1%}{spread:12s} {cer}")

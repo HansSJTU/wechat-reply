@@ -1,8 +1,8 @@
 """OpenAI /v1/audio/transcriptions (multipart)."""
 import httpx
 
-from . import keys
-from .audio import Audio
+from .. import keys
+from ..audio import Audio
 
 URL = "https://api.openai.com/v1/audio/transcriptions"
 

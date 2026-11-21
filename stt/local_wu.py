@@ -8,11 +8,11 @@ import array
 import os
 
 from .audio import RATE, Audio
+from .paths import MODELS
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODEL_DIR = os.path.join(ROOT, "models", "wu-u2pp-int8")
+MODEL_DIR = os.path.join(MODELS, "wu-u2pp-int8")
 # Same model fine-tuned on the labeled WeChat voices (finetune/u2pp.py train + export).
-FT_DIR = os.path.join(ROOT, "models", "wu-u2pp-ft")
+FT_DIR = os.path.join(MODELS, "wu-u2pp-ft")
 _recs = {}
 
 

@@ -13,10 +13,9 @@ import re
 import httpx
 
 from . import keys
+from .paths import GLOSSARY  # 说法表 (labeling page), if present
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NOTES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yuyao_notes.md")  # grammar and particles
-GLOSSARY = os.path.join(ROOT, "data", "labels", "glossary.json")  # 说法表 (labeling page), if present
 
 URL = "https://api.deepseek.com/chat/completions"
 MODEL = "deepseek-flash"

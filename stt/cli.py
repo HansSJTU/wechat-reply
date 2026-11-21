@@ -7,7 +7,7 @@
 
   uv run stt/cli.py                       every data/media/*voice.wav, every provider with a key
   uv run stt/cli.py a.m4a b.wav           specific files (any format ffmpeg reads)
-  uv run stt/cli.py -p volc-stream-2,openai a.wav
+  uv run stt/cli.py -p whisper-ft,wu-ft a.wav
   uv run stt/cli.py --list                providers and whether their key is set
   uv run stt/cli.py -e "期望1" -e "期望2" a.wav b.wav
                                           reference transcripts, paired with files in order (CER)
@@ -27,24 +27,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from stt import PROVIDERS, available, transcribe  # noqa: E402
 from stt.audio import Audio  # noqa: E402
+from stt.cer import cer  # noqa: E402
 from stt.keys import KEYS_FILE  # noqa: E402
+from stt.paths import DATA  # noqa: E402
 
-OUT = os.path.join(ROOT, "data", "stt_results.jsonl")
-
-
-def cer(ref: str, hyp: str) -> float:
-    """Character error rate, ignoring punctuation and spaces."""
-    keep = lambda s: [c for c in s if c.isalnum()]  # noqa: E731
-    r, h = keep(ref), keep(hyp)
-    if not r:
-        return 0.0 if not h else 1.0
-    prev = list(range(len(h) + 1))
-    for i, rc in enumerate(r, 1):
-        cur = [i] + [0] * len(h)
-        for j, hc in enumerate(h, 1):
-            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (rc != hc))
-        prev = cur
-    return prev[-1] / len(r)
+OUT = os.path.join(DATA, "stt_results.jsonl")
 
 
 def main():
@@ -68,7 +55,7 @@ def main():
         sys.exit(f"unknown provider(s): {', '.join(unknown)}  (see --list)")
     if not names:
         sys.exit(f"no API keys configured — fill in {os.path.relpath(KEYS_FILE)} (see --list)")
-    files = args.files or sorted(glob.glob(os.path.join(ROOT, "data", "media", "*voice.wav")))
+    files = args.files or sorted(glob.glob(os.path.join(DATA, "media", "*voice.wav")))
     if not files:
         sys.exit("no input files")
     if args.expect and len(args.expect) != len(files):

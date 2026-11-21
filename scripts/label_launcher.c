@@ -1,4 +1,4 @@
-// Dedicated launcher for the labeling-page LaunchAgent (stt/label.py serve).
+// Dedicated launcher for the labeling-page LaunchAgent (labeling/label.py serve).
 //
 // Same idea as launcher.c: the project lives in ~/Documents, and macOS charges
 // that privacy check to the "responsible" process. Spawning label.py as a child
@@ -32,7 +32,7 @@ int main(void) {
         perror("chdir " PROJECT_DIR);
         return 1;
     }
-    char *argv[] = {"uv", "run", "-q", PROJECT_DIR "/stt/label.py", "serve", NULL};
+    char *argv[] = {"uv", "run", "-q", PROJECT_DIR "/labeling/label.py", "serve", NULL};
     if (posix_spawn(&child, UV_PATH, NULL, NULL, argv, environ) != 0) {
         perror("spawn " UV_PATH);
         return 1;

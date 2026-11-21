@@ -2,8 +2,9 @@
 import os
 import tomllib
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-KEYS_FILE = os.path.join(ROOT, "secrets", "stt_keys.toml")
+from .paths import SECRETS
+
+KEYS_FILE = os.path.join(SECRETS, "stt_keys.toml")
 
 # name in stt_keys.toml -> environment variable
 NAMES = {

@@ -5,8 +5,8 @@ advertised for Chinese dialects). Docs: https://docs.siliconflow.cn/cn/api-refer
 """
 import httpx
 
-from . import keys
-from .audio import Audio
+from .. import keys
+from ..audio import Audio
 
 URL = "https://api.siliconflow.cn/v1/audio/transcriptions"
 

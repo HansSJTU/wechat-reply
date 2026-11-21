@@ -3,7 +3,7 @@
 #
 # Watched chats: remark, nickname, alias, or username (wxid_… / …@chatroom).
 # `uv run monitor.py chats` lists them. Messages this account sends itself are ignored. Every message is
-# recorded (data/messages.jsonl; voices as wav for the labeling page, stt/label.py).
+# recorded (data/messages.jsonl; voices as wav for the labeling page, labeling/label.py).
 # Each chat is switched with 开启 / 关闭 (1:1: send the word; group: "@<me> 开启"), kept in data/bot.db:
 #   开启  voices are transcribed with [stt] provider; 1:1 chats get a reply to every message, groups when
 #         a message @-mentions this account (or quotes it) and, with [group] auto, now and then unasked

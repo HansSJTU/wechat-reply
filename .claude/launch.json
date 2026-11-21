@@ -4,7 +4,7 @@
     {
       "name": "label",
       "runtimeExecutable": "uv",
-      "runtimeArgs": ["run", "-q", "stt/label.py", "serve"],
+      "runtimeArgs": ["run", "-q", "labeling/label.py", "serve"],
       "port": 8765
     }
   ]

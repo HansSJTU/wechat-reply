@@ -8,7 +8,7 @@
 # ///
 """Fine-tune the WenetSpeech-Wu U2++ Conformer (the model behind wu-local) on the labeled WeChat voices.
 
-  uv run stt/label.py export          data/labels/wenet/{train,test}.jsonl from the labeling page
+  uv run labeling/label.py export          data/labels/wenet/{train,test}.jsonl from the labeling page
   uv run finetune/u2pp.py eval        CER of the original model on test (and train)
   uv run finetune/u2pp.py train       fine-tune → models/wu-u2pp-ft/final.pt, then eval it
   uv run finetune/u2pp.py eval --ckpt models/wu-u2pp-ft/final.pt
@@ -39,10 +39,13 @@ import torchaudio
 import torch.nn.functional as F
 import yaml
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BASE = os.path.join(ROOT, "models", "wu-u2pp-torch")
-OUT = os.path.join(ROOT, "models", "wu-u2pp-ft")
-DATA = os.path.join(ROOT, "data", "labels", "wenet")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from stt.cer import edits  # noqa: E402
+from stt.paths import LABELS, MODELS  # noqa: E402
+
+BASE = os.path.join(MODELS, "wu-u2pp-torch")
+OUT = os.path.join(MODELS, "wu-u2pp-ft")
+DATA = os.path.join(LABELS, "wenet")
 RATE = 16000
 
 
@@ -133,16 +136,6 @@ def batchify(items: list[dict], train: bool, bucket: bool = False) -> dict:
 
 
 # ---------------------------------------------------------------- eval
-
-def edits(a: str, b: str) -> int:
-    p = list(range(len(b) + 1))
-    for i, x in enumerate(a, 1):
-        c = [i]
-        for j, y in enumerate(b, 1):
-            c.append(min(p[j] + 1, c[j - 1] + 1, p[j - 1] + (x != y)))
-        p = c
-    return p[-1]
-
 
 METHODS = ["ctc_greedy_search", "attention_rescoring"]
 

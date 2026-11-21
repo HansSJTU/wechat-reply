@@ -1,11 +1,11 @@
 """Provider registry and the single `transcribe()` entry point."""
+import importlib
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import (aliyun_api, deepseek_api, gemini_api, local_whisper_wu, local_wu, openai_api, refine, siliconflow_api, tencent_api,
-               volc_api, xfyun_api)
+from . import local_whisper_wu, local_wu, refine
 from .audio import Audio
 
 
@@ -21,49 +21,19 @@ def _p(name, label, run, ready):
     return name, Provider(name, label, run, ready)
 
 
-# newest available 2026-11-14 (gemini_api.models()); gemini-omni-* rejects audio input on this key
+def _cloud(module: str, fn: str = "transcribe", *args, ready: str = "ready", **kw):
+    """(run, ready) for a function of stt/cloud/<module>.py, imported on first use."""
+    def mod():
+        return importlib.import_module(f"{__package__}.cloud.{module}")
+    return (lambda a: getattr(mod(), fn)(a, *args, **kw)), (lambda: getattr(mod(), ready)())
+
+
+# newest available 2026-11-14 (cloud.gemini.models()); gemini-omni-* rejects audio input on this key
 GEMINI_FLASH, GEMINI_PRO, GEMINI_4 = "gemini-3.8-flash", "gemini-3.1-pro-preview", "gemini-4-carbon"
 
 PROVIDERS: dict[str, Provider] = dict([
-    # OpenAI — gpt-transcribe is current; the 4o/whisper models shut down 2027-02-26.
-    _p("openai", "OpenAI gpt-transcribe", lambda a: openai_api.transcribe(a, "gpt-transcribe"), openai_api.ready),
-    _p("openai-4o", "OpenAI gpt-4o-transcribe", lambda a: openai_api.transcribe(a, "gpt-4o-transcribe"), openai_api.ready),
-    _p("openai-4o-mini", "OpenAI gpt-4o-mini-transcribe", lambda a: openai_api.transcribe(a, "gpt-4o-mini-transcribe"), openai_api.ready),
-    _p("openai-whisper", "OpenAI whisper-1", lambda a: openai_api.transcribe(a, "whisper-1"), openai_api.ready),
-    # DeepSeek ASR tool API
-    _p("deepseek", "DeepSeek ASR", deepseek_api.transcribe, deepseek_api.ready),
-    # Volcengine: 流式 (nostream websocket) / 录音文件 (submit+query) / 极速版, 1.0 vs 2.0
-    _p("volc-stream-2", "火山 流式语音识别 2.0 (seedasr, nostream)",
-       lambda a: volc_api.stream(a, "volc.seedasr.sauc.duration"), volc_api.ready),
-    _p("volc-stream-1", "火山 流式语音识别大模型 1.0 (bigasr, nostream)",
-       lambda a: volc_api.stream(a, "volc.bigasr.sauc.duration"), volc_api.ready),
-    _p("volc-file-2", "火山 录音文件识别 2.0 (seedasr)",
-       lambda a: volc_api.file(a, "volc.seedasr.auc"), volc_api.ready),
-    _p("volc-file-1", "火山 录音文件识别大模型 1.0 (bigasr)",
-       lambda a: volc_api.file(a, "volc.bigasr.auc"), volc_api.ready),
-    _p("volc-flash", "火山 录音文件识别 极速版 (auc_turbo)",
-       lambda a: volc_api.flash(a, "volc.bigasr.auc_turbo"), volc_api.ready),
-    # Alibaba 百炼: all list 吴语
-    _p("ali-qwen3", "阿里 qwen3-asr-flash", aliyun_api.qwen3, aliyun_api.ready),
-    _p("ali-fun", "阿里 fun-asr-flash-2026-06-15",
-       lambda a: aliyun_api.multimodal(a, "fun-asr-flash-2026-06-15"), aliyun_api.ready),
-    _p("ali-audio31", "阿里 qwen-audio-3.1-asr-flash (方言→普通话)",
-       lambda a: aliyun_api.multimodal(a, "qwen-audio-3.1-asr-flash"), aliyun_api.ready),
-    # Tencent Cloud
-    _p("tencent-dialect", "腾讯 一句话识别 16k_zh_dialect (23方言, 含上海话)",
-       tencent_api.sentence, tencent_api.ready),
-    _p("tencent-flash", "腾讯 极速版 16k_zh_en (大模型1.0)", tencent_api.flash, tencent_api.ready_flash),
-    _p("tencent-2.0", "腾讯 录音文件 16k_zh_en_2.0 (大模型2.0, 含宁波话/吴语)", tencent_api.rec, tencent_api.ready),
-    # iFlytek
-    _p("xf-v2", "讯飞 语音听写大模型 V2.0 (202方言, 含宁波话)", xfyun_api.transcribe, xfyun_api.ready),
-    _p("xf-dialect", "讯飞 方言大模型 slm/mulacc (普通话+202方言免切换)",
-       lambda a: xfyun_api.transcribe(a, domain="slm", accent="mulacc"), xfyun_api.ready),
-    # SiliconFlow 硅基流动
-    _p("sf-sensevoice", "硅基流动 FunAudioLLM/SenseVoiceSmall",
-       lambda a: siliconflow_api.transcribe(a, "FunAudioLLM/SenseVoiceSmall"), siliconflow_api.ready),
-    _p("sf-telespeech", "硅基流动 TeleAI/TeleSpeechASR (电信, 方言)",
-       lambda a: siliconflow_api.transcribe(a, "TeleAI/TeleSpeechASR"), siliconflow_api.ready),
-    # Local, offline: WenetSpeech-Wu U2++ Conformer (needs sherpa-onnx + models/wu-u2pp-int8)
+    # Local, offline (audio never leaves the machine): WenetSpeech-Wu U2++ Conformer (sherpa-onnx) and
+    # Whisper-Medium-Wu, each as released and fine-tuned on the labeled clips (finetune/).
     _p("wu-local", "本地 WenetSpeech-Wu U2++ int8 (吴语, CPU)", local_wu.transcribe, local_wu.ready),
     _p("wu-ft", "本地 U2++ 微调版 int8 (用标注的微信语音微调, CPU)",
        lambda a: local_wu.transcribe(a, local_wu.FT_DIR), lambda: local_wu.ready(local_wu.FT_DIR)),
@@ -72,15 +42,44 @@ PROVIDERS: dict[str, Provider] = dict([
     _p("whisper-ft", "本地 Whisper-Medium-Wu 微调版 (用标注的语音微调, MPS)",
        lambda a: local_whisper_wu.transcribe(a, ckpt=local_whisper_wu.FT_CKPT),
        lambda: local_whisper_wu.ready(local_whisper_wu.FT_CKPT)),
-    # Gemini: one multimodal call that hears 余姚话 and writes Mandarin (see gemini_api.MANDARIN)
-    _p("gemini-flash", f"Gemini {GEMINI_FLASH} → 普通话",
-       lambda a: gemini_api.transcribe(a, GEMINI_FLASH), gemini_api.ready),
-    _p("gemini-pro", f"Gemini {GEMINI_PRO} → 普通话",
-       lambda a: gemini_api.transcribe(a, GEMINI_PRO), gemini_api.ready),
-    _p("gemini-4", f"Gemini {GEMINI_4} → 普通话",
-       lambda a: gemini_api.transcribe(a, GEMINI_4), gemini_api.ready),
+    # ---- cloud (stt/cloud/), for comparison only
+    # OpenAI — gpt-transcribe is current; the 4o/whisper models shut down 2027-02-26.
+    _p("openai", "OpenAI gpt-transcribe", *_cloud("openai", "transcribe", "gpt-transcribe")),
+    _p("openai-4o", "OpenAI gpt-4o-transcribe", *_cloud("openai", "transcribe", "gpt-4o-transcribe")),
+    _p("openai-4o-mini", "OpenAI gpt-4o-mini-transcribe", *_cloud("openai", "transcribe", "gpt-4o-mini-transcribe")),
+    _p("openai-whisper", "OpenAI whisper-1", *_cloud("openai", "transcribe", "whisper-1")),
+    # DeepSeek ASR tool API
+    _p("deepseek", "DeepSeek ASR", *_cloud("deepseek")),
+    # Volcengine: 流式 (nostream websocket) / 录音文件 (submit+query) / 极速版, 1.0 vs 2.0
+    _p("volc-stream-2", "火山 流式语音识别 2.0 (seedasr, nostream)", *_cloud("volc", "stream", "volc.seedasr.sauc.duration")),
+    _p("volc-stream-1", "火山 流式语音识别大模型 1.0 (bigasr, nostream)", *_cloud("volc", "stream", "volc.bigasr.sauc.duration")),
+    _p("volc-file-2", "火山 录音文件识别 2.0 (seedasr)", *_cloud("volc", "file", "volc.seedasr.auc")),
+    _p("volc-file-1", "火山 录音文件识别大模型 1.0 (bigasr)", *_cloud("volc", "file", "volc.bigasr.auc")),
+    _p("volc-flash", "火山 录音文件识别 极速版 (auc_turbo)", *_cloud("volc", "flash", "volc.bigasr.auc_turbo")),
+    # Alibaba 百炼: all list 吴语
+    _p("ali-qwen3", "阿里 qwen3-asr-flash", *_cloud("aliyun", "qwen3")),
+    _p("ali-fun", "阿里 fun-asr-flash-2026-06-15", *_cloud("aliyun", "multimodal", "fun-asr-flash-2026-06-15")),
+    _p("ali-audio31", "阿里 qwen-audio-3.1-asr-flash (方言→普通话)",
+       *_cloud("aliyun", "multimodal", "qwen-audio-3.1-asr-flash")),
+    # Tencent Cloud
+    _p("tencent-dialect", "腾讯 一句话识别 16k_zh_dialect (23方言, 含上海话)", *_cloud("tencent", "sentence")),
+    _p("tencent-flash", "腾讯 极速版 16k_zh_en (大模型1.0)", *_cloud("tencent", "flash", ready="ready_flash")),
+    _p("tencent-2.0", "腾讯 录音文件 16k_zh_en_2.0 (大模型2.0, 含宁波话/吴语)", *_cloud("tencent", "rec")),
+    # iFlytek
+    _p("xf-v2", "讯飞 语音听写大模型 V2.0 (202方言, 含宁波话)", *_cloud("xfyun")),
+    _p("xf-dialect", "讯飞 方言大模型 slm/mulacc (普通话+202方言免切换)",
+       *_cloud("xfyun", domain="slm", accent="mulacc")),
+    # SiliconFlow 硅基流动
+    _p("sf-sensevoice", "硅基流动 FunAudioLLM/SenseVoiceSmall",
+       *_cloud("siliconflow", "transcribe", "FunAudioLLM/SenseVoiceSmall")),
+    _p("sf-telespeech", "硅基流动 TeleAI/TeleSpeechASR (电信, 方言)",
+       *_cloud("siliconflow", "transcribe", "TeleAI/TeleSpeechASR")),
+    # Gemini: one multimodal call that hears 余姚话 and writes Mandarin (see cloud.gemini.MANDARIN)
+    _p("gemini-flash", f"Gemini {GEMINI_FLASH} → 普通话", *_cloud("gemini", "transcribe", GEMINI_FLASH)),
+    _p("gemini-pro", f"Gemini {GEMINI_PRO} → 普通话", *_cloud("gemini", "transcribe", GEMINI_PRO)),
+    _p("gemini-4", f"Gemini {GEMINI_4} → 普通话", *_cloud("gemini", "transcribe", GEMINI_4)),
     _p("gemini-transcribe", "Gemini gemini-3.5-transcribe (dedicated ASR, ignores the prompt)",
-       lambda a: gemini_api.transcribe(a, "gemini-3.5-transcribe"), gemini_api.ready),
+       *_cloud("gemini", "transcribe", "gemini-3.5-transcribe")),
 ])
 
 # Speech APIs whose transcripts the `combo` provider hands to the LLM (see stt/refine.py).

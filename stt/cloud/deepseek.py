@@ -5,8 +5,8 @@ Docs: https://api-docs.deepseek.com/guides/asr
 """
 import httpx
 
-from . import keys
-from .audio import Audio
+from .. import keys
+from ..audio import Audio
 
 URL = "https://api.deepseek.com/v1/tools/asr"
 

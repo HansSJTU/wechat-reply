@@ -12,13 +12,13 @@ Source: https://huggingface.co/ASLP-lab/WenetSpeech-Wu-Speech-Understanding (whi
 import os
 
 from .audio import Audio
+from .paths import MODELS
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DIR = os.path.join(ROOT, "models", "whisper-medium-wu")
+DIR = os.path.join(MODELS, "whisper-medium-wu")
 WENET_CKPT = os.path.join(DIR, "whisper-medium.pt")
 OPENAI_CKPT = os.path.join(DIR, "whisper-medium-wu.openai.pt")
 # The same model fine-tuned on the labeled clips (finetune/whisper_ft.py train + export)
-FT_CKPT = os.path.join(ROOT, "models", "whisper-wu-ft", "whisper-ft.openai.pt")
+FT_CKPT = os.path.join(MODELS, "whisper-wu-ft", "whisper-ft.openai.pt")
 
 DIMS = dict(n_mels=80, n_audio_ctx=1500, n_audio_state=1024, n_audio_head=16, n_audio_layer=24,
             n_vocab=51865, n_text_ctx=448, n_text_state=1024, n_text_head=16, n_text_layer=24)

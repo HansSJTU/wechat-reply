@@ -15,8 +15,8 @@ from urllib.parse import urlencode
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 from websockets.sync.client import connect
 
-from . import keys
-from .audio import RATE, Audio
+from .. import keys
+from ..audio import RATE, Audio
 
 HOST, PATH = "iat.cn-huabei-1.xf-yun.com", "/v1"
 FRAME = 8000  # bytes of PCM per frame (250 ms); docs suggest 40 ms frames for live audio

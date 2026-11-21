@@ -6,16 +6,17 @@ Merges, per watched chat:
   data/voice_stt.jsonl    the bot's transcription of each voice while the chat was 开启 (candidates + Mandarin)
   data/labels/            local model drafts and the human label of each voice
 开启 / 关闭 markers are read back from the command messages, parsed as wxbot/pipeline.py does.
-Stdlib only; everything stays on this machine.
+Stdlib only (config via wxbot/config.py); everything stays on this machine.
 """
 import json
 import os
 import re
 import sqlite3
-import tomllib
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA = os.path.join(ROOT, "data")
+from labeling.dataset import DRAFTS, LABELS, VOICE_STT
+from stt.paths import DATA
+from wxbot.config import load_config, switch_words
+
 MENTION = re.compile(r"@[^\s ]+[\s ]*")
 
 
@@ -23,23 +24,6 @@ def _jsonl(path):
     if not os.path.exists(path):
         return []
     return [json.loads(l) for l in open(path, encoding="utf-8") if l.strip()]
-
-
-def _config():
-    cfg = {}
-    for name in ("config.toml", "config.local.toml"):
-        p = os.path.join(ROOT, name)
-        if os.path.exists(p):
-            with open(p, "rb") as f:
-                for k, v in tomllib.load(f).items():
-                    cfg[k] = {**cfg[k], **v} if isinstance(v, dict) and isinstance(cfg.get(k), dict) else v
-    return cfg
-
-
-def _words(cfg):
-    r = cfg.get("reply", {})
-    return (r.get("on_words", r.get("unmute_words", ["开启", "打开"])),
-            r.get("off_words", r.get("mute_words", ["关闭"])))
 
 
 def _db():
@@ -76,7 +60,7 @@ def _switch_row(con, chat):
 
 
 def chats() -> list[dict]:
-    cfg = _config()
+    cfg = load_config()
     msgs = _jsonl(os.path.join(DATA, "messages.jsonl"))
     con = _db()
     by_chat = {}
@@ -103,14 +87,13 @@ def _preview(m):
 
 
 def chat(chat_id: str) -> dict:
-    cfg = _config()
-    on_words, off_words = _words(cfg)
+    cfg = load_config()
+    on_words, off_words = switch_words(cfg)
     msgs = [m for m in _jsonl(os.path.join(DATA, "messages.jsonl")) if m["chat"] == chat_id]
-    stt = {r["key"]: r for r in _jsonl(os.path.join(DATA, "voice_stt.jsonl")) if r.get("chat") == chat_id}
-    drafts = json.load(open(os.path.join(DATA, "labels", "drafts.json"), encoding="utf-8")) \
-        if os.path.exists(os.path.join(DATA, "labels", "drafts.json")) else {}
+    stt = {r["key"]: r for r in _jsonl(VOICE_STT) if r.get("chat") == chat_id}
+    drafts = json.load(open(DRAFTS, encoding="utf-8")) if os.path.exists(DRAFTS) else {}
     labels = {}
-    for r in _jsonl(os.path.join(DATA, "labels", "labels.jsonl")):
+    for r in _jsonl(LABELS):
         labels[r["key"]] = r
     # what the reply LLM saw for each message (bot.db, by local_id): the transcription of voices from before
     # voice_stt.jsonl existed

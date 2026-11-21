@@ -23,6 +23,7 @@ import threading
 import time
 
 from . import llm
+from .config import switch_words
 from .log import log
 from .paths import DATA, ROOT
 from .sender import NotReady
@@ -366,8 +367,7 @@ class Pipeline:
         restart); the confirmation is a fixed text, not the LLM. Returns True when the batch's last
         command was handled."""
         cmd = None
-        off_words = self.r.get("off_words", self.r.get("mute_words", ["关闭"]))
-        on_words = self.r.get("on_words", self.r.get("unmute_words", ["开启", "打开"]))
+        on_words, off_words = switch_words(self.cfg)
         names = self.g.get("names") or []
         summary_words = self.s.get("words", ["总结", "总结一下"])
         for ev in live:

@@ -1,0 +1,19 @@
+# Copy to config.local.toml (gitignored). It overrides config.toml key by key (tables are merged), so put
+# only what is yours here: the chats to watch, where you are, your prompts.
+# `uv run monitor.py chats [query]` lists usernames.
+
+chats = []                  # 1:1 chats that start 开启, e.g. ["wxid_xxxxxxxx"]
+mention = []                # groups that start 开启 (answer @s), e.g. ["12345678901@chatroom"]
+listen = []                 # watched and recorded, start 关闭
+
+[llm]
+# model = "gpt-5.5"
+location = { country = "CN", region = "Zhejiang", city = "Ningbo" }   # where "today's weather" is
+# system_prompt = """…"""   # who the bot is and how it talks
+# group_prompt = """…"""
+
+[group]
+names = []                  # what people call the bot besides its WeChat nickname, e.g. ["莫名其妙"]
+
+# [group.members]           # per group: who is who, for the reply model and the judge
+# "12345678901@chatroom" = """妈妈 = 张三；小明 = 李四"""

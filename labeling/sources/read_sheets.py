@@ -5,8 +5,8 @@
 # ///
 """Reading sheets: 余姚话 sentences for people to read aloud and send back as WeChat voice messages.
 
-  uv run stt/read_sheets.py check     problems in the sentences + 说法表 coverage
-  uv run stt/read_sheets.py sheets    data/read/sheets/sheet-NN.txt (+ .json with the sentence ids)
+  uv run labeling/sources/read_sheets.py check     problems in the sentences + 说法表 coverage
+  uv run labeling/sources/read_sheets.py sheets    data/read/sheets/sheet-NN.txt (+ .json with the sentence ids)
 
 Sentences: data/read/sentences.tsv, one per line: id <TAB> 余姚话 (说法表 spellings) <TAB> 普通话.
 Reading hints: data/read/readings.tsv, `key <TAB> reading`, where key is a character or a word (words win,
@@ -21,13 +21,13 @@ import re
 import sys
 from collections import Counter, defaultdict
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DIR = os.path.join(ROOT, "data", "read")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from stt.paths import DATA, GLOSSARY, WU_TOKENS as TOKENS  # noqa: E402
+
+DIR = os.path.join(DATA, "read")
 SENTENCES = os.path.join(DIR, "sentences.tsv")
 READINGS = os.path.join(DIR, "readings.tsv")
 SHEETS = os.path.join(DIR, "sheets")
-GLOSSARY = os.path.join(ROOT, "data", "labels", "glossary.json")
-TOKENS = os.path.join(ROOT, "models", "wu-u2pp-int8", "tokens.txt")
 PUNCT = {"，": ",", "？": "?", "！": "!", "。": "", "、": ",", "：": ":", "；": ";"}
 HAN = re.compile(r"[㐀-鿿]")
 

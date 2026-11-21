@@ -91,7 +91,7 @@ Reading messages works across 4.x builds. **Sending works only on WeChat 4.2.0 b
    cp examples/config.local.toml config.local.toml
    uv run monitor.py chats            # usernames of your chats; put them in config.local.toml
    ```
-   The defaults need OpenAI, DeepSeek and Volcengine keys (`examples/stt_keys.toml` explains each).
+   The defaults need OpenAI (replies) and DeepSeek (voice → Mandarin) keys (`examples/stt_keys.toml` explains each).
 7. **Try it in the foreground.** With WeChat-debug running, start a dry run and send any text by hand
    from WeChat-debug (the sender's seed, needed once per WeChat launch):
    ```bash
@@ -134,7 +134,7 @@ kqueue on message_*.db/-wal -> source.py -> pipeline.py (one thread per chat)
   (text/image/voice/app/emoji/…), `text`, `image_path`, `voice_path` (wav), `title`/`url`/`quote`
   for app messages, `latency_ms` (vs sender timestamp), `pipeline_ms` (WeChat DB write -> event).
   Every chat in the three lists of `config.toml` is watched and recorded the same way (voice saved as
-  `data/media/<local_id>_<md5(chat)[:8]>_voice.wav`, picked up by `stt/label.py`). The lists only set a
+  `data/media/<local_id>_<md5(chat)[:8]>_voice.wav`, picked up by `labeling/label.py`). The lists only set a
   chat's state before its first 开启 / 关闭: `chats` and `mention` start on, `listen` off. Group lines
   reach the LLM as `name：text`, with `[llm] group_prompt` appended to the system prompt.
 - `pipeline.py`: ignores messages this account sends itself, waits `debounce_seconds` after a
@@ -205,12 +205,18 @@ The native sender is GPL-3.0-or-later; see `tools/NATIVE_SEND_NOTICE.md`.
   dies; it needs only the Documents folder. Log: `data/label.log`. `scripts/install.sh label uninstall`
   removes it.
 
-## Speech-to-text (`stt/`)
+## Repository layout
 
-`uv run stt/cli.py` transcribes `data/media/*voice.wav` with every configured provider (OpenAI,
-DeepSeek, five Volcengine variants) side by side. Keys go in `secrets/stt_keys.toml`. See `stt/README.md`.
+| dir | what | docs |
+|---|---|---|
+| `monitor.py`, `wxbot/` | the reply bot (read → understand → reply → send) | this file |
+| `stt/` | speech-to-text: local Wu models + the LLM step behind `combo`; cloud APIs in `stt/cloud/` for comparison (`uv run stt/cli.py`) | `stt/README.md` |
+| `labeling/` | labeling page (+ chat viewer) and builders of extra training clips | `labeling/README.md` |
+| `finetune/` | fine-tuning and evaluating the local Wu models | `finetune/README.md` |
+| `tools/`, `scripts/` | key capture, debuggable WeChat copy, LaunchAgent launchers | this file |
+| `docs/` | measurements behind the current STT choices | `docs/stt-experiments.md` |
 
-Labeling for fine-tuning a local Wu model: `uv run stt/label.py serve` (see `stt/README.md`).
+API keys for all of them: `secrets/stt_keys.toml` (template `examples/stt_keys.toml`).
 
 ## Keys (`secrets/wechat_keys.json`, mode 600 — never commit or share)
 

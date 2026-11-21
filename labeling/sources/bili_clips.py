@@ -1,14 +1,14 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["httpx", "numpy", "websockets>=13", "sherpa-onnx"]
+# dependencies = ["httpx", "numpy", "sherpa-onnx"]
 # ///
-"""Training clips from 余姚话 videos: on-screen text (stt/bili_ocr.py) → timed clips → proposed 余姚话 →
+"""Training clips from 余姚话 videos: on-screen text (bili_ocr.py) → timed clips → proposed 余姚话 →
 the labeling page, where each clip is confirmed by ear like a WeChat voice.
 
-  uv run stt/bili_clips.py build      group OCR segments into items, cut and trim 16 kHz clips
-  uv run stt/bili_clips.py convert    propose 余姚话 for each item (GPT, text only; cached)
-  uv run stt/bili_clips.py publish    write data/labels/extra_clips.jsonl for the labeling page
+  uv run labeling/sources/bili_clips.py build      group OCR segments into items, cut and trim 16 kHz clips
+  uv run labeling/sources/bili_clips.py convert    propose 余姚话 for each item (GPT, text only; cached)
+  uv run labeling/sources/bili_clips.py publish    write data/labels/extra_clips.jsonl for the labeling page
 
 Media and OCR live in data/bili/ (<video>.m4a, ocr/<video>.jsonl); clips go to data/bili/clips/.
 Kinds of on-screen text, set per source/time range in SOURCES:
@@ -22,21 +22,23 @@ import difflib
 import json
 import os
 import re
-import subprocess
 import sys
-import wave
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT)
-DIR = os.path.join(ROOT, "data", "bili")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from labeling.dataset import EXTRA, drafts as asr_drafts, glossary, glossary_prompt, split_of  # noqa: E402
+from labeling.llm import llm_json  # noqa: E402
+from labeling.sources.wavio import RATE, read_pcm, speech_span, to_wav, write_wav  # noqa: E402
+from stt.local_wu import FT_DIR  # noqa: E402
+from stt.paths import DATA  # noqa: E402
+
+DIR = os.path.join(DATA, "bili")
 CLIPS = os.path.join(DIR, "clips")
 ITEMS = os.path.join(DIR, "items.jsonl")
 CONVERTED = os.path.join(DIR, "converted.json")
-RATE = 16000
 MODEL = "gpt-6.2-sol"  # default: text only. --model gemini-… also sends the clip (only when asked for)
 
 # (video file stem, key prefix, who/what for the page, [(from s, to s, kind, lag)])
@@ -142,45 +144,12 @@ def slide_sentences(rows):
     return out
 
 
-def to_wav(stem: str) -> str:
-    out = os.path.join(DIR, "wav", stem + ".wav")
-    if not os.path.exists(out):
-        os.makedirs(os.path.dirname(out), exist_ok=True)
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", os.path.join(DIR, stem + ".m4a"),
-                        "-ac", "1", "-ar", str(RATE), out], check=True)
-    return out
-
-
-def read_pcm(path: str) -> np.ndarray:
-    with wave.open(path) as w:
-        return np.frombuffer(w.readframes(w.getnframes()), np.int16)
-
-
-def speech_span(x: np.ndarray, pad: float = 0.25):
-    """First/last stretch louder than -30 dB of the peak and 3× the noise floor (as on the labeling page)."""
-    hop = RATE // 100
-    n = len(x) // hop
-    if n < 5:
-        return None
-    rms = np.sqrt((x[:n * hop].astype(np.float64).reshape(n, hop) ** 2).mean(1))
-    thr = max(rms.max() * 0.0316, 3 * np.percentile(rms, 10))
-    loud = rms > thr
-    run = np.convolve(loud, np.ones(3), "same") >= 3
-    idx = np.flatnonzero(run)
-    if not len(idx):
-        return None
-    a = max(0, idx[0] * hop - int(pad * RATE))
-    b = min(len(x), (idx[-1] + 1) * hop + int(pad * RATE))
-    return a, b
-
-
 def timeline(stem: str, pcm: np.ndarray) -> list[tuple[float, str]]:
     """(seconds, character) for every character the fine-tuned CTC model (wu-ft) emits; cached per video."""
     path = os.path.join(DIR, "ocr", stem + ".ctc.json")
     if os.path.exists(path):
         return [tuple(x) for x in json.load(open(path, encoding="utf-8"))]
     import sherpa_onnx
-    from stt.local_wu import FT_DIR
     rec = sherpa_onnx.OfflineRecognizer.from_wenet_ctc(model=os.path.join(FT_DIR, "model.int8.onnx"),
                                                        tokens=os.path.join(FT_DIR, "tokens.txt"), num_threads=4)
     out, step = [], 20 * RATE
@@ -227,15 +196,6 @@ def locate(tl, text: str, lo: float, hi: float):
     return times[i], times[j], best[3]
 
 
-def write_wav(path: str, x: np.ndarray):
-    with wave.open(path + ".tmp", "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(RATE)
-        w.writeframes(x.astype(np.int16).tobytes())
-    os.replace(path + ".tmp", path)
-
-
 def build():
     os.makedirs(CLIPS, exist_ok=True)
     items = []
@@ -246,7 +206,7 @@ def build():
         kind0 = ranges[0][2]
         groups = (group_yubao(rows) if kind0 == "yubao" else slide_sentences(rows) if kind0 == "slides"
                   else group_subtitles(rows, ranges))
-        pcm = read_pcm(to_wav(stem))
+        pcm = read_pcm(to_wav(os.path.join(DIR, stem + ".m4a"), os.path.join(DIR, "wav", stem + ".wav")))
         tl = timeline(stem, pcm) if kind0 in ("yubao", "slides") else None
         cursor = 0.0  # slides: sentences are read in order
         kept = moved = dropped = 0
@@ -348,7 +308,6 @@ def propose(it: dict, glossary: str, drafts: dict, model: str = MODEL) -> dict:
     """GPT is text only: clips without on-screen dialect text use the local ASR drafts (whisper-wu / wu-local /
     wu-ft, filled in by the labeling server) as the evidence of what was said. A Gemini model also gets the clip
     (except 语保 items, whose dialect characters and IPA are on screen)."""
-    from stt.label import llm_json
     d = drafts.get(it["key"], {})
     heard = "；".join(f"{n}：{t}" for n, t in d.items() if t) or "（无）"
     place = "慈溪" if "慈溪" in it["sender"] else "余姚"
@@ -364,12 +323,9 @@ def propose(it: dict, glossary: str, drafts: dict, model: str = MODEL) -> dict:
 
 def convert(workers: int, only: list[str] | None = None, limit: int | None = None, model: str = MODEL,
             redo: list[str] | None = None):
-    from stt.label import glossary
-    gl = "\n".join(f"{e['wu']} = {e['mandarin']}" + (f"；别写成：{'、'.join(e['avoid'])}" if e.get("avoid") else "")
-                   for e in glossary())
+    gl = glossary_prompt()
     items = [json.loads(l) for l in open(ITEMS, encoding="utf-8")]
     done = json.load(open(CONVERTED, encoding="utf-8")) if os.path.exists(CONVERTED) else {}
-    from stt.label import drafts as asr_drafts
     dr = asr_drafts()
     by_text = {v["text"]: v for v in done.values() if v.get("text")}
     for it in items:  # a rebuild can renumber clips: proposals follow their text, not the key
@@ -403,7 +359,6 @@ def convert(workers: int, only: list[str] | None = None, limit: int | None = Non
 
 
 def publish():
-    from stt.label import EXTRA, glossary, split_of
     gloss = glossary()
     items = [json.loads(l) for l in open(ITEMS, encoding="utf-8")]
     conv = json.load(open(CONVERTED, encoding="utf-8")) if os.path.exists(CONVERTED) else {}

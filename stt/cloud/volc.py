@@ -20,8 +20,8 @@ import httpx
 from websockets.exceptions import InvalidStatus
 from websockets.sync.client import connect
 
-from . import keys
-from .audio import RATE, Audio
+from .. import keys
+from ..audio import RATE, Audio
 
 HOST = "openspeech.bytedance.com"
 OK = "20000000"

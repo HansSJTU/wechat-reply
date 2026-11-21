@@ -16,8 +16,8 @@ import time
 
 import httpx
 
-from . import keys
-from .audio import Audio
+from .. import keys
+from ..audio import Audio
 
 HOST = "asr.tencentcloudapi.com"
 

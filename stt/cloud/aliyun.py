@@ -11,8 +11,8 @@ import base64
 
 import httpx
 
-from . import keys
-from .audio import RATE, Audio
+from .. import keys
+from ..audio import RATE, Audio
 
 
 def ready() -> bool:

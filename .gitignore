@@ -8,4 +8,4 @@ __pycache__/
 # downloaded model weights (stt/local_wu.py)
 models/
 # personal chats, location and prompts (overrides config.toml)
-config.local.toml
+/config.local.toml

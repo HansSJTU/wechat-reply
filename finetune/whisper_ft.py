@@ -4,7 +4,6 @@
 # dependencies = [
 #   "wenet @ https://github.com/wenet-e2e/wenet/archive/be6ad97fdb512589df113042f7ff3a29d392fb38.tar.gz",
 #   "torch==2.5.1", "torchaudio==2.5.1", "numpy<2", "pyyaml", "openai-whisper", "librosa",
-#   "httpx", "websockets>=13",  # export imports stt/, whose package imports the API clients
 # ]
 # ///
 """Fine-tune Whisper-Medium-Wu (the model behind whisper-wu) on the labeled clips, like finetune/u2pp.py.
@@ -34,11 +33,12 @@ import torch.nn.functional as F
 import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import u2pp  # noqa: E402  (data loading, CER, test-set split)
+import u2pp  # noqa: E402  (data loading, test-set split; puts the project root on sys.path)
+from stt.cer import edits  # noqa: E402
+from stt.paths import MODELS  # noqa: E402
 
-ROOT = u2pp.ROOT
-BASE = os.path.join(ROOT, "models", "whisper-medium-wu")
-OUT = os.path.join(ROOT, "models", "whisper-wu-ft")
+BASE = os.path.join(MODELS, "whisper-medium-wu")
+OUT = os.path.join(MODELS, "whisper-wu-ft")
 VOCAB = 51865
 _tok = None
 
@@ -127,7 +127,7 @@ def evaluate(model, items, dev, show=False) -> float:
         except AssertionError:  # looped past the decoder's 448 positions without an end token: all wrong
             print(f"  ({it['key']}: decoding looped, counted as all wrong)", flush=True)
             hyp = ""
-        e = u2pp.edits(hyp, it["txt"])
+        e = edits(hyp, it["txt"])
         errs += e
         total += len(it["txt"])
         if show:
@@ -198,7 +198,6 @@ def train(args):
 
 def export(ckpt: str):
     """WeNet checkpoint → openai-whisper fp16 (the same mapping stt/local_whisper_wu.py uses)."""
-    sys.path.insert(0, ROOT)
     from stt import local_whisper_wu
     dst = os.path.join(OUT, "whisper-ft.openai.pt")
     local_whisper_wu.convert(ckpt, dst)

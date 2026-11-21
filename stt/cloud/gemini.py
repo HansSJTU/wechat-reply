@@ -11,8 +11,8 @@ import re
 
 import httpx
 
-from . import keys
-from .audio import Audio
+from .. import keys
+from ..audio import Audio
 
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 
