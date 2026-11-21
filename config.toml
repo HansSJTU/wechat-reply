@@ -119,3 +119,10 @@ provider = "combo"          # local whisper-ft -> deepseek-flash (wu-ft only rec
 fetch_full = true           # WeChat only downloads full-size images when opened; have WeChat-debug fetch them
 fetch_timeout_seconds = 10  # then fall back to the thumbnail
 image_wait_seconds = 0      # extra wait for the client's own full-size download (not needed with fetch_full)
+
+[housekeeping]              # keeps data/ bounded (wxbot/housekeeping.py); checked every 10 min, media daily
+log_max_mb = 5              # data/monitor.log, label.out, …: past this size moved to .1 (oldest .N dropped)
+log_keep = 3
+image_days = 120            # data/media images older than this are deleted (0 = keep forever)
+voice_days = 0              # unlabeled voice clips older than this are deleted; 0 = keep forever, since they are
+                            # labeling / fine-tuning material. Labeled clips are never deleted.

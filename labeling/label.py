@@ -193,6 +193,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(port: int, auto_draft: bool):
+    from wxbot import housekeeping
+    from wxbot.config import load_config
+    housekeeping.start(load_config(), media=False)  # rotates data/label.out (media is the bot's job)
     if auto_draft:
         def loop():
             while True:

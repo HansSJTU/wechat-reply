@@ -196,7 +196,7 @@ def chat(chat_id: str) -> dict:
                       label=lab and {"wu": lab.get("wu"), "meaning": lab.get("meaning"), "status": lab.get("status")})
             # while on, the bot read `mandarin`: voice_stt.jsonl, or bot.db for voices from before that file
             heard = mandarin if live_on else next((local_d[n] for n in command_stt if local_d.get(n)), None)
-        if m["type"] == "image" and m.get("image_path"):
+        if m["type"] == "image" and m.get("image_path") and os.path.exists(m["image_path"]):  # may have expired
             it["image"] = os.path.basename(m["image_path"])
         if m.get("local_id") in decisions:
             it["decision"] = decisions[m["local_id"]]

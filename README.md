@@ -101,7 +101,8 @@ Reading messages works across 4.x builds. **Sending works only on WeChat 4.2.0 b
 8. **Run it in the background.** `scripts/install.sh` builds `~/Library/Application Support/wechat-monitor/
    WeChat Monitor.app` and loads it as a LaunchAgent. Add that app under System Settings → Privacy &
    Security → Full Disk Access (⌘⇧G to type the path) and allow its "access data from other apps"
-   prompt; run `scripts/install.sh` again to restart it. Log: `data/monitor.log`.
+   prompt; run `scripts/install.sh` again to restart it. Log: `data/monitor.log`, rotated past 5 MB to
+   `.1`–`.3`; images in `data/media` expire after 120 days, voice clips are kept (`[housekeeping]`).
 
 ### Other WeChat versions
 

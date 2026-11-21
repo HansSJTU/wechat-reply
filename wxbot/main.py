@@ -12,6 +12,7 @@ from .paths import DATA, ROOT
 
 
 def run(cfg, dry_run):
+    from . import housekeeping
     from .pipeline import Pipeline
     from .sender import NativeSender, NotReady
     from .source import Source
@@ -19,6 +20,7 @@ def run(cfg, dry_run):
 
     os.makedirs(DATA, mode=0o700, exist_ok=True)
     os.chmod(DATA, 0o700)
+    housekeeping.start(cfg)  # rotate data/monitor.log, expire old data/media
     store = Store(os.path.join(DATA, "bot.db"))
     pipeline = None
     sender = NativeSender(on_event=lambda ev: pipeline and pipeline.on_sender_event(ev))
