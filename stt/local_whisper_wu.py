@@ -10,6 +10,7 @@ length and the mel is passed un-padded, as in training.
 Source: https://huggingface.co/ASLP-lab/WenetSpeech-Wu-Speech-Understanding (whisper/)
 """
 import os
+import threading
 
 from .audio import Audio
 from .paths import MODELS
@@ -22,8 +23,11 @@ FT_CKPT = os.path.join(MODELS, "whisper-wu-ft", "whisper-ft.openai.pt")
 
 DIMS = dict(n_mels=80, n_audio_ctx=1500, n_audio_state=1024, n_audio_head=16, n_audio_layer=24,
             n_vocab=51865, n_text_ctx=448, n_text_state=1024, n_text_head=16, n_text_layer=24)
+MAX_FRAMES = DIMS["n_audio_ctx"] * 2  # 3000 mel frames = 30.0 s (positional_embedding cap)
+MAX_SAMPLES = MAX_FRAMES * 160        # 16 kHz, hop 160 (10 ms/frame)
 
 _models = {}
+_lock = threading.RLock()
 
 
 def ready(ckpt: str = OPENAI_CKPT) -> bool:
@@ -132,29 +136,58 @@ def _patch_encoder(model):
 
 
 def _load(ckpt: str = OPENAI_CKPT):
-    if ckpt not in _models:
-        import torch
-        import whisper
-        if ckpt == OPENAI_CKPT and not os.path.exists(_out_path(OPENAI_CKPT)):  # also redoes pre-fix conversions
-            convert()
-        m = whisper.load_model(ckpt, device="cpu")
-        _patch_decoder(m, ckpt)
-        if torch.backends.mps.is_available():  # the sparse alignment_heads buffer can't move to MPS
-            m.register_buffer("alignment_heads", m.alignment_heads.to_dense(), persistent=False)
-            m = m.to("mps")
-        _patch_encoder(m)
-        _models[ckpt] = m
-    return _models[ckpt]
+    with _lock:
+        if ckpt not in _models:
+            import torch
+            import whisper
+            if ckpt == OPENAI_CKPT and not os.path.exists(_out_path(OPENAI_CKPT)):  # also redoes pre-fix conversions
+                convert()
+            m = whisper.load_model(ckpt, device="cpu")
+            _patch_decoder(m, ckpt)
+            if torch.backends.mps.is_available():  # the sparse alignment_heads buffer can't move to MPS
+                m.register_buffer("alignment_heads", m.alignment_heads.to_dense(), persistent=False)
+                m = m.to("mps")
+            _patch_encoder(m)
+            _models[ckpt] = m
+        return _models[ckpt]
 
 
-def transcribe(audio: Audio, beam_size: int = 5, ckpt: str = OPENAI_CKPT) -> str:
-    import numpy as np  # heavy deps imported lazily so `import stt` works without them
+def _split_pcm(pcm, max_samples: int = MAX_SAMPLES, slack: int = 5 * 16000):
+    """Split audio longer than Whisper's 30 s window into near-equal chunks, each cut at the quietest
+    100 ms within ±5 s of the even split point, so no chunk is a near-silent sliver (Whisper
+    invents text such as 谢谢观看 for those)."""
+    import numpy as np
+    if len(pcm) <= max_samples:
+        return [pcm]
+    chunks, pos, hop = [], 0, 1600  # 100 ms at 16 kHz
+    while len(pcm) - pos > max_samples:
+        rest = len(pcm) - pos
+        target = pos + rest // -(-rest // max_samples)  # rest / chunks still needed
+        lo, hi = max(pos + hop, target - slack), min(pos + max_samples, target + slack)
+        seg = pcm[lo:hi]
+        n = len(seg) // hop
+        if n > 0:
+            energy = (seg[: n * hop].reshape(n, hop) ** 2).mean(axis=1)
+            cut = lo + int(np.argmin(energy)) * hop + hop // 2
+        else:
+            cut = hi
+        chunks.append(pcm[pos:cut])
+        pos = cut
+    if pos < len(pcm):
+        chunks.append(pcm[pos:])
+    return chunks
+
+
+def _decode_chunk(model, pcm_chunk, beam_size: int) -> str:
     import torch
     import whisper
-    model = _load(ckpt)
-    pcm = np.frombuffer(audio.pcm, dtype=np.int16).astype(np.float32) / 32768.0
-    mel = whisper.log_mel_spectrogram(torch.from_numpy(pcm), n_mels=80).to(model.device)
-    mel = mel[:, : mel.shape[-1] // 2 * 2]  # conv2 has stride 2
+    if len(pcm_chunk) < 400:  # shorter than Whisper's 25 ms STFT window (reflect pad 200)
+        return ""
+    mel = whisper.log_mel_spectrogram(torch.from_numpy(pcm_chunk), n_mels=80).to(model.device)
+    frames = min(mel.shape[-1], MAX_FRAMES) // 2 * 2  # conv2 has stride 2; cap at n_audio_ctx * 2
+    if frames < 2:
+        return ""
+    mel = mel[:, :frames]
     base = dict(language="zh", task="transcribe", without_timestamps=True, fp16=model.device.type != "cpu")
     with torch.no_grad():
         r = whisper.decode(model, mel, whisper.DecodingOptions(beam_size=beam_size, **base))
@@ -165,3 +198,16 @@ def transcribe(audio: Audio, beam_size: int = 5, ckpt: str = OPENAI_CKPT) -> str
             torch.manual_seed(0)
             r = whisper.decode(model, mel, whisper.DecodingOptions(temperature=t, best_of=5, **base))
         return r.text.strip()
+
+
+def transcribe(audio: Audio, beam_size: int = 5, ckpt: str = OPENAI_CKPT) -> str:
+    import numpy as np  # heavy deps imported lazily so `import stt` works without them
+    pcm = np.frombuffer(audio.pcm, dtype=np.int16).astype(np.float32) / 32768.0
+    if len(pcm) < 400:
+        return ""
+    chunks = _split_pcm(pcm)
+    # whisper.decode installs per-call KV-cache hooks on the shared model and seeds torch globally
+    with _lock:
+        model = _load(ckpt)
+        parts = [_decode_chunk(model, c, beam_size) for c in chunks]
+    return "".join(p for p in parts if p)

@@ -95,8 +95,7 @@ class Pipeline:
             threading.Thread(target=self._flush_pending, name="flush", daemon=True).start()
 
     def _on(self, chat, ev):
-        s = self.store.enabled(chat)
-        return ev.get("reply") in ("always", "mention") if s is None else s
+        return self.store.is_on(chat, ev.get("reply"))
 
     def _spot(self, chat, ev):
         """关闭: listen for a spoken 开启 with a local-only model (the first ready one of [reply] command_stt).

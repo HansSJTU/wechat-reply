@@ -8,6 +8,7 @@ WeChat itself sends, so after each WeChat launch one manual text send is require
 import json
 import os
 import secrets
+import struct
 import subprocess
 import threading
 import time
@@ -61,6 +62,19 @@ def debug_pid() -> int | None:
     return pids[0] if pids else None
 
 
+def _image_complete(data: bytes) -> bool | None:
+    """True if `data` ends cleanly for its image format, False if truncated, None when no trailer exists."""
+    if data.startswith(b"\xff\xd8\xff"):
+        return data.rstrip(b"\x00").endswith(b"\xff\xd9")
+    if data.startswith(b"\x89PNG"):
+        return b"IEND" in data[-16:]
+    if data.startswith(b"GIF8"):
+        return data.endswith(b"\x3b")
+    if data.startswith(b"RIFF") and len(data) >= 12:
+        return len(data) >= 8 + struct.unpack("<I", data[4:8])[0]
+    return None
+
+
 class NativeSender:
     def __init__(self, on_event=None):
         self.on_event = on_event or (lambda ev: None)
@@ -68,6 +82,8 @@ class NativeSender:
         self.session = self.script = None
         self.pid = None
         self.seed_ready = threading.Event()
+        self._active_downloads = 0
+        self._keep_until = 0.0
 
     # ---- attachment ----------------------------------------------------------
     def _attach(self):
@@ -75,13 +91,23 @@ class NativeSender:
         if pid is None:
             raise NotReady("WeChat-debug is not running")
         session = frida.attach(pid)
-        script = session.create_script(AGENT.read_text())
-        script.on("message", self._on_message)
-        session.on("detached", lambda reason, crash: self._on_detached(pid, reason))
-        script.load()
-        script.exports_sync.initialize()
+        try:
+            script = session.create_script(AGENT.read_text())
+            script.on("message", self._on_message)
+            script.load()
+            script.exports_sync.initialize()
+        except Exception:
+            try:
+                session.detach()
+            except Exception:
+                pass
+            raise
         self.session, self.script, self.pid = session, script, pid
         self.seed_ready.clear()
+        session.on("detached", lambda reason, crash: self._on_detached(pid, reason))
+        if getattr(session, "is_detached", False):
+            self.session = self.script = self.pid = None
+            raise NotReady("WeChat-debug detached during attach")
         log(f"sender: attached to WeChat-debug pid {pid}; waiting for one manual text send as seed")
 
     def _on_detached(self, pid, reason):
@@ -113,18 +139,22 @@ class NativeSender:
             return {"attached": True, **self.script.exports_sync.status()}
 
     def close(self):
-        """Detach. If WeChat still holds tasks that call our serializer, leave the agent in place."""
+        """Detach. If WeChat still holds tasks that call our serializer (or an image download is in
+        flight), leave the agent in place."""
         with self.lock:
-            if self.script is None:
-                return
-            try:
-                if self.script.exports_sync.status()["inFlight"]:
-                    self.script.eternalize()
-                    log("sender: tasks in flight; agent stays loaded until WeChat exits")
-                self.session.detach()
-            except Exception as e:
-                log(f"sender: close failed: {e}")
+            session, script = self.session, self.script
             self.session = self.script = self.pid = None
+            self.seed_ready.clear()
+            keep_alive = self._active_downloads > 0 or time.monotonic() < self._keep_until
+        if script is None:
+            return
+        try:
+            if keep_alive or script.exports_sync.status()["inFlight"]:
+                script.eternalize()
+                log("sender: tasks/downloads in flight; agent stays loaded until WeChat exits")
+            session.detach()
+        except Exception as e:
+            log(f"sender: close failed: {e}")
 
     # ---- sending -------------------------------------------------------------
     def send_text(self, to: str, text: str) -> dict:
@@ -163,24 +193,49 @@ class NativeSender:
         with self.lock:
             if self.script is None:
                 raise NotReady("WeChat-debug went away")
-            r = self.script.exports_sync.download(me, cdn_url, aes_key, 2, path)
-        if r["result"]:
-            raise Refused(f"WeChat refused the download ({r['result'] - (1 << 32) if r['result'] >= 1 << 31 else r['result']})")
-        deadline, last = time.monotonic() + timeout, -1
+            self._active_downloads += 1
+            try:
+                r = self.script.exports_sync.download(me, cdn_url, aes_key, 2, path)
+            except Exception:
+                self._active_downloads -= 1
+                raise
+            if r["result"]:
+                self._active_downloads -= 1
+                raise Refused(f"WeChat refused the download ({r['result'] - (1 << 32) if r['result'] >= 1 << 31 else r['result']})")
+        deadline, last, stable = time.monotonic() + timeout, -1, 0
+        got = None
         try:
             while time.monotonic() < deadline:  # bounded wait for this one download
                 time.sleep(0.25)
-                size = os.path.getsize(path) if os.path.exists(path) else -1
-                if size > 0 and size == last:   # unchanged for one interval: written
-                    return Path(path).read_bytes()
+                try:
+                    size = os.path.getsize(path)
+                except OSError:
+                    size = -1
+                if size > 0 and size == last:
+                    stable += 1
+                    try:
+                        data = Path(path).read_bytes()
+                    except OSError:
+                        data = b""
+                    if data:
+                        complete = _image_complete(data)
+                        if complete is True or (complete is None and stable >= 2) or stable >= 4:
+                            got = data
+                            return got
+                else:
+                    stable = 0
                 last = size
             return None
         finally:
-            # WeChat may still be writing after a timeout; remove what is there now and later
+            with self.lock:
+                self._active_downloads -= 1
+                # WeChat may still hold/write the request after a timeout (or briefly after completion)
+                self._keep_until = max(self._keep_until, time.monotonic() + (2.0 if got is not None else 60.0))
             Path(path).unlink(missing_ok=True)
-            late = threading.Timer(60, lambda: Path(path).unlink(missing_ok=True))
-            late.daemon = True
-            late.start()
+            if got is None:
+                late = threading.Timer(60, lambda: Path(path).unlink(missing_ok=True))
+                late.daemon = True
+                late.start()
 
 
 def main():

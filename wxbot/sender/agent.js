@@ -144,10 +144,11 @@ const DL_TEMPLATE = [
 function hexBytes(h) { const a = []; for (let i = 0; i < h.length; i += 2) a.push(parseInt(h.substr(i, 2), 16)); return a; }
 function longString(req, off, value, hold) {
   const data = Memory.allocUtf8String(value);
+  const byteLen = unescape(encodeURIComponent(value)).length;  // UTF-8 bytes; value.length counts UTF-16 units
   hold.push(data);
   req.add(off).writePointer(data);
-  req.add(off + 8).writeU64(value.length);
-  req.add(off + 0x10).writeU64(uint64('0x8000000000000000').add(value.length + 1));
+  req.add(off + 8).writeU64(byteLen);
+  req.add(off + 0x10).writeU64(uint64('0x8000000000000000').add(byteLen + 1));
 }
 function cdnManager() {  // resolved on first use: by then WeChat is logged in and delivering messages
   if (cdn) return cdn;

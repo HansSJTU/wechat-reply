@@ -53,6 +53,13 @@ class LiveDB:
                 self.plain[18:20] = b"\x01\x01"  # rollback-journal mode for the standalone copy
         return changed
 
+    def reset(self):
+        """Drop cached pages so the next refresh() re-reads from disk (e.g. after a torn read)."""
+        self._main_sig = None
+        self._main.clear()
+        self._applied.clear()
+        self.plain.clear()
+
     def connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(":memory:")
         if self.plain:

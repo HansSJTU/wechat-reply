@@ -30,6 +30,7 @@ TYPES = {1: "text", 3: "image", 34: "voice", 42: "card", 43: "video", 47: "emoji
          49: "app", 50: "call", 10000: "system", 10002: "system"}
 ZSTD = zstandard.ZstdDecompressor()
 QUOTED = {"3": "[图片]", "34": "[语音]", "43": "[视频]", "47": "[表情]", "48": "[位置]", "42": "[名片]"}
+BUILD_ATTEMPTS = 3
 
 
 def account_dir():
@@ -73,8 +74,11 @@ class Contacts:
             return
         self.db.refresh()
         con = self.db.connect()
-        self.by_user = {u: dict(remark=r or "", nick=n or "", alias=a or "")
-                        for u, r, n, a in con.execute("select username, remark, nick_name, alias from contact")}
+        try:
+            self.by_user = {u: dict(remark=r or "", nick=n or "", alias=a or "")
+                            for u, r, n, a in con.execute("select username, remark, nick_name, alias from contact")}
+        finally:
+            con.close()
         self.loaded = time.time()
 
     def name(self, user):
@@ -99,6 +103,7 @@ class Source:
         """fetch_image(me, cdn_url, aes_key, timeout) -> bytes | None: full-size image via WeChat."""
         self.cfg, self.store, self.on_message, self.on_wake = cfg, store, on_message, on_wake
         self.fetch_image = fetch_image
+        self.started = time.time()
         self.acc = account_dir()
         self.keys = load_keys()
         self.me = re.sub(r"_[0-9a-f]{4}$", "", os.path.basename(self.acc.rstrip("/")))
@@ -113,7 +118,9 @@ class Source:
         self.mode.update({u: "always" for u in self.contacts.resolve(chats)})
         self.targets = set(self.mode)
         self.msgdbs, self.last = {}, {}
-        self.media = None
+        self._pending_init = set(self.message_dbs())
+        self._retry_dbs = set()
+        self.mediadbs = {}
         self.events = queue.Queue()
         img = self.keys.get("image", {})
         self.img_key = img.get("aes_key", "").encode()
@@ -123,27 +130,48 @@ class Source:
         log("watching:", ", ".join(f"{self.contacts.name(u)} ({u}) [{self.mode[u]}]" for u in sorted(self.targets)))
 
     # ---- detection -------------------------------------------------------
+    @staticmethod
+    def _shard_no(path):
+        return int(re.search(r"_(\d+)\.db$", path).group(1))
+
     def message_dbs(self):
-        return sorted(glob.glob(self.acc + "db_storage/message/message_[0-9]*.db"))
+        return sorted(glob.glob(self.acc + "db_storage/message/message_[0-9]*.db"), key=self._shard_no)
+
+    def media_dbs(self):
+        """Newest shard first: that is where a just-arrived voice lands."""
+        return sorted(glob.glob(self.acc + "db_storage/message/media_[0-9]*.db"), key=self._shard_no, reverse=True)
 
     def scan(self, initial=False):
         for path in self.message_dbs():
+            is_init = initial or path in self._pending_init
+            must_scan = is_init or path in self._retry_dbs
             db = self.msgdbs.get(path)
-            if db is None:
-                db = self.msgdbs[path] = LiveDB(path, key_for_db(path, self.keys, self.acc))
             try:
+                if db is None:
+                    db = self.msgdbs[path] = LiveDB(path, key_for_db(path, self.keys, self.acc))
                 changed = db.refresh()
             except Exception as e:  # torn read during a checkpoint: next event retries
                 log(f"refresh {os.path.basename(path)} failed: {e}")
+                self._retry_dbs.add(path)
                 continue
-            if not changed and not initial:
+            if not changed and not must_scan:
                 continue
+            con = None
             try:
-                self._scan_db(path, db.connect(), initial)
+                con = db.connect()
+                self._scan_db(path, con, is_init)
             except Exception as e:
                 log(f"query {os.path.basename(path)} failed: {e}")
+                db.reset()
+                self._retry_dbs.add(path)
+            else:
+                self._pending_init.discard(path)
+                self._retry_dbs.discard(path)
+            finally:
+                if con is not None:
+                    con.close()
 
-    def _scan_db(self, path, con, initial):
+    def _scan_db(self, path, con, is_init):
         id2user = dict(con.execute("select rowid, user_name from Name2Id"))
         tables = {r[0] for r in con.execute("select name from sqlite_master where type='table' and name like 'Msg_%'")}
         for user in self.targets:
@@ -151,18 +179,24 @@ class Source:
             if t not in tables:
                 continue
             k = (path, t)
-            if initial:
+            if k not in self.last:
                 saved = self.store.cursor(self._cursor_key(k))
-                if saved is None:  # first run for this chat: start at the newest message
-                    row = con.execute(f"select max(local_id) from '{t}'").fetchone()
-                    saved = row[0] or 0
+                if saved is None:
+                    newest = con.execute(f"select coalesce(max(local_id), 0) from '{t}'").fetchone()[0]
+                    if is_init:  # first run for this chat: start at the newest message
+                        saved = newest
+                    else:  # table or shard created while running: deliver what arrived since the bot
+                        # started, not history WeChat may have copied into it (sync, migration)
+                        first = con.execute(f"select min(local_id) from '{t}' where create_time >= ?",
+                                            (int(self.started) - 60,)).fetchone()[0]
+                        saved = newest if first is None else first - 1
                     self.store.set_cursor(self._cursor_key(k), saved)
                 self.last[k] = saved
             rows = con.execute(
                 f"select local_id, server_id, local_type, real_sender_id, create_time, message_content, "
                 f"WCDB_CT_message_content, packed_info_data, source, WCDB_CT_source from '{t}' "
                 f"where local_id > ? order by local_id",
-                (self.last.get(k, 0),)).fetchall()
+                (self.last[k],)).fetchall()
             if rows:
                 try:  # when WeChat wrote this transaction, to time our own pipeline
                     written = os.stat(path + "-wal").st_mtime
@@ -180,8 +214,19 @@ class Source:
     def _worker(self):
         while True:
             k, user, id2user, r, written = self.events.get()
+            ev = None
+            for attempt in range(BUILD_ATTEMPTS):  # reading voice/image data can hit a torn read: retry here,
+                try:                               # since later rows of the chat would move the cursor past it
+                    ev = self.build(user, id2user, r)
+                    break
+                except Exception as e:
+                    log(f"event {r[0]} build failed ({attempt + 1}/{BUILD_ATTEMPTS}): {e!r}")
+                    if attempt + 1 < BUILD_ATTEMPTS:
+                        time.sleep(1.0)
+            if ev is None:  # nothing was acted on, so a restart may safely deliver it again
+                log(f"event {r[0]} dropped for this run; cursor not advanced")
+                continue
             try:
-                ev = self.build(user, id2user, r)
                 now = time.time()
                 ev["latency_ms"] = int((now - ev["time"]) * 1000)  # vs sender timestamp (1 s resolution)
                 ev["pipeline_ms"] = int((now - written) * 1000)   # WeChat's DB write -> this event
@@ -189,7 +234,10 @@ class Source:
                 self.on_message(ev)
             except Exception as e:
                 log(f"event failed: {e!r}")
-            self.store.set_cursor(self._cursor_key(k), r[0])
+            try:  # advance even if on_message raised: it may already have replied, a replay would reply twice
+                self.store.set_cursor(self._cursor_key(k), r[0])
+            except Exception as e:
+                log(f"cursor update failed: {e!r}")
 
     def build(self, chat, id2user, r):
         local_id, server_id, ltype, sender_id, ctime, content, ct_flag, packed, src, src_flag = r
@@ -209,7 +257,7 @@ class Source:
             if ev["is_group"] and base == 1:
                 ev["mentions_me"], ev["at_others"] = self.mentions(text, text_of(src, src_flag))
         elif base == 3:
-            ev.update(self.image(chat, ctime, local_id, packed, text))
+            ev.update(self.image(chat, ctime, local_id, packed, text, is_self=ev["is_self"]))
         elif base == 34:
             ev.update(self.voice(chat, server_id, local_id, text))
         elif base == 49:
@@ -238,7 +286,7 @@ class Source:
         others = bool(users - {self.me, "notify@all"}) or "notify@all" in users or "@所有人" in text
         return me, others
 
-    def image(self, chat, ctime, local_id, packed, xml):
+    def image(self, chat, ctime, local_id, packed, xml, is_self=False):
         m = re.search(rb"[0-9a-f]{32}", packed or b"")
         if not m:
             return {"image_error": "no file id in message"}
@@ -256,8 +304,9 @@ class Source:
         img, origin = None, None
         thumb = f"{d}/{md5}_t.dat"
         if full:
-            img, origin = decrypt_image(open(full[0], "rb").read(), self.img_key, self.img_xor), "local"
-        elif self.should_fetch(chat, ctime):
+            with open(full[0], "rb") as f:
+                img, origin = decrypt_image(f.read(), self.img_key, self.img_xor), "local"
+        elif self.should_fetch(chat, ctime, is_self=is_self):
             # The message row lands before the client has downloaded the thumbnail, and a request for
             # the same image while that runs is refused (-20003): let the thumbnail arrive first.
             wait_for(thumb, 5)
@@ -265,11 +314,13 @@ class Source:
             origin = img and "cdn"
             full = [] if img else [p for p in (f"{d}/{md5}_h.dat", f"{d}/{md5}.dat") if os.path.exists(p)]
             if full:  # meanwhile the client fetched it itself (chat open)
-                img, origin = decrypt_image(open(full[0], "rb").read(), self.img_key, self.img_xor), "local"
+                with open(full[0], "rb") as f:
+                    img, origin = decrypt_image(f.read(), self.img_key, self.img_xor), "local"
         if img is None:
             if not wait_for(thumb, 3):
                 return {"image_error": "file not downloaded yet", "image_id": md5}
-            img, origin = decrypt_image(open(thumb, "rb").read(), self.img_key, self.img_xor), "thumbnail"
+            with open(thumb, "rb") as f:
+                img, origin = decrypt_image(f.read(), self.img_key, self.img_xor), "thumbnail"
         if image_kind(img) == "wxgf":  # WeChat's own HEVC container: the LLM needs JPEG
             img = wxgf_to_jpeg(img) or img
         kind = image_kind(img) or "bin"
@@ -279,10 +330,11 @@ class Source:
         return {"image_path": out, "image_is_thumbnail": origin == "thumbnail", "image_origin": origin,
                 "image_format": kind}
 
-    def should_fetch(self, chat, ctime):
-        """Fetch full size only for chats that can be answered, and not for old backlog."""
-        return (self.fetch_image is not None and self.cfg.get("media", {}).get("fetch_full", True)
-                and self.mode.get(chat) in ("always", "mention")
+    def should_fetch(self, chat, ctime, is_self=False):
+        """Fetch full size only for chats currently 开启, and not for own messages or old backlog."""
+        return (not is_self and self.fetch_image is not None
+                and self.cfg.get("media", {}).get("fetch_full", True)
+                and self.store.is_on(chat, self.mode.get(chat))
                 and time.time() - ctime <= float(self.cfg.get("reply", {}).get("max_age_seconds", 600)))
 
     def fetch_full(self, local_id, xml, timeout):
@@ -311,20 +363,45 @@ class Source:
         log(f"image {local_id}: full size fetched ({len(img) // 1024} KB, {ms} ms)")
         return img
 
+    def _voice_blob(self, path, sql, params):
+        db = self.mediadbs.get(path)
+        con = None
+        try:
+            if db is None:
+                db = self.mediadbs[path] = LiveDB(path, key_for_db(path, self.keys, self.acc))
+            db.refresh()
+            con = db.connect()
+            row = con.execute(sql, params).fetchone()
+        except Exception as e:  # torn read during a checkpoint: drop the mirror, the next attempt re-reads
+            log(f"voice lookup in {os.path.basename(path)} failed: {e}")
+            if db is not None:
+                db.reset()
+            return None
+        finally:
+            if con is not None:
+                con.close()
+        return row[0] if row else None
+
     def voice(self, chat, server_id, local_id, xml):
         dur = re.search(r'voicelength="(\d+)"', xml)
         res = {"voice_ms": int(dur.group(1)) if dur else None}
-        if self.media is None:
-            p = self.acc + "db_storage/message/media_0.db"
-            self.media = LiveDB(p, key_for_db(p, self.keys, self.acc))
+        # local_id is per chat: match it only within this chat (media_*.db has its own Name2Id)
+        local = "local_id = ? and chat_name_id = (select rowid from Name2Id where user_name = ?)"
+        if server_id:
+            sql = f"select voice_data from VoiceInfo where svr_id = ? or (svr_id = 0 and {local}) limit 1"
+            params = (server_id, local_id, chat)
+        else:  # own voice not yet acknowledged by the server
+            sql = f"select voice_data from VoiceInfo where {local} limit 1"
+            params = (local_id, chat)
         data = None
-        for _ in range(20):  # the voice blob can land a moment after the message row (≤5 s, bounded)
-            self.media.refresh()
-            row = self.media.connect().execute(
-                "select voice_data from VoiceInfo where svr_id = ? or (svr_id = 0 and local_id = ?) limit 1",
-                (server_id, local_id)).fetchone()
-            if row:
-                data = row[0]
+        shards = self.media_dbs()
+        for attempt in range(20):  # the voice blob can land a moment after the message row (≤5 s, bounded)
+            # first pass: every shard; retries: only the newest, where a late blob is written
+            for p in shards if attempt == 0 else shards[:1]:
+                data = self._voice_blob(p, sql, params)
+                if data:
+                    break
+            if data:
                 break
             time.sleep(0.25)
         if not data:
@@ -333,14 +410,20 @@ class Source:
         # local_id is per chat: tag the file with the chat so two chats never overwrite each other
         base = os.path.join(DATA, "media", f"{local_id}_{hashlib.md5(chat.encode()).hexdigest()[:8]}_voice")
         silk = data[1:] if data[:1] == b"\x02" else data
-        with open(base + ".silk", "wb") as f:
-            f.write(silk)
-        pilk.decode(base + ".silk", base + ".pcm", pcm_rate=24000)
-        with open(base + ".pcm", "rb") as f:
-            pcm = f.read()
-        with wave.open(base + ".wav", "wb") as w:
-            w.setnchannels(1), w.setsampwidth(2), w.setframerate(24000), w.writeframes(pcm)
-        os.remove(base + ".silk"), os.remove(base + ".pcm")
+        try:
+            with open(base + ".silk", "wb") as f:
+                f.write(silk)
+            pilk.decode(base + ".silk", base + ".pcm", pcm_rate=24000)
+            with open(base + ".pcm", "rb") as f:
+                pcm = f.read()
+            with wave.open(base + ".wav", "wb") as w:
+                w.setnchannels(1), w.setsampwidth(2), w.setframerate(24000), w.writeframes(pcm)
+        finally:
+            for ext in (".silk", ".pcm"):
+                try:
+                    os.remove(base + ext)
+                except FileNotFoundError:
+                    pass
         return {**res, "voice_path": base + ".wav"}
 
     @staticmethod
@@ -392,6 +475,8 @@ class Source:
                 try:
                     ino = os.stat(p).st_ino
                 except FileNotFoundError:
+                    if p in watched:
+                        os.close(watched.pop(p)[0])
                     continue
                 if p in watched and watched[p][1] == ino:
                     continue
@@ -422,7 +507,11 @@ def list_chats(q):
     p = acc + "db_storage/session/session.db"
     s = LiveDB(p, key_for_db(p, keys, acc))
     s.refresh()
-    rows = s.connect().execute("select username, sort_timestamp from SessionTable order by sort_timestamp desc")
+    con = s.connect()
+    try:
+        rows = con.execute("select username, sort_timestamp from SessionTable order by sort_timestamp desc").fetchall()
+    finally:
+        con.close()
     for user, ts in rows:
         name = contacts.name(user)
         if q and q not in name and q not in user:

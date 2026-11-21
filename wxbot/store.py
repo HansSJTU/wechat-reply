@@ -72,6 +72,11 @@ class Store:
             row = self.db.execute("select on_ from switches where chat = ?", (chat,)).fetchone()
         return None if row is None else bool(row[0])
 
+    def is_on(self, chat, mode):
+        """开启 / 关闭 if the chat was switched, else its configured reply mode decides."""
+        s = self.enabled(chat)
+        return mode in ("always", "mention") if s is None else s
+
     def set_enabled(self, chat, on, at=None):
         with self.lock:
             self.db.execute("insert into switches values (?, ?, ?) on conflict(chat) do update set "
@@ -116,3 +121,12 @@ class Store:
                                    "and role = 'assistant' and time >= ? and json_extract(meta, '$.auto') "
                                    "is not null order by time", (chat, since)).fetchall()
         return [(t, k) for t, k in rows]
+
+    def checkpoint(self):
+        """Fold the WAL back into the main DB file (at shutdown). The connection stays open: worker
+        threads may still record a reply that was just sent, and those writes must not fail."""
+        with self.lock:
+            try:
+                self.db.execute("pragma wal_checkpoint(TRUNCATE)")
+            except sqlite3.Error:
+                pass

@@ -23,7 +23,8 @@ def run(cfg, dry_run):
     pipeline = None
     sender = NativeSender(on_event=lambda ev: pipeline and pipeline.on_sender_event(ev))
     pipeline = Pipeline(cfg, store, sender, dry_run=dry_run)
-    source = Source(cfg, store, pipeline.on_message, pipeline.on_wake, fetch_image=sender.download_image)
+    source = Source(cfg, store, pipeline.on_message, pipeline.on_wake,
+                    fetch_image=None if dry_run else sender.download_image)
     def stop(*_):  # launchd and the launcher may both deliver SIGTERM; act on the first only
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         # Watchdog: before this, a stopped bot outlived its launcher (a leftover thread kept the
@@ -42,6 +43,7 @@ def run(cfg, dry_run):
         source.run()
     finally:
         sender.close()
+        store.checkpoint()
         log("bot stopped")
         os._exit(0)  # don't wait for non-daemon threads (Frida, workers): they kept the process alive
 

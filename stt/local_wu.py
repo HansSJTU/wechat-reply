@@ -6,6 +6,7 @@ https://huggingface.co/csukuangfj2/sherpa-onnx-wenetspeech-wu-u2pp-conformer-ctc
 """
 import array
 import os
+import threading
 
 from .audio import RATE, Audio
 from .paths import MODELS
@@ -14,6 +15,7 @@ MODEL_DIR = os.path.join(MODELS, "wu-u2pp-int8")
 # Same model fine-tuned on the labeled WeChat voices (finetune/u2pp.py train + export).
 FT_DIR = os.path.join(MODELS, "wu-u2pp-ft")
 _recs = {}
+_lock = threading.Lock()
 
 
 def ready(model_dir: str = MODEL_DIR) -> bool:
@@ -27,14 +29,15 @@ def ready(model_dir: str = MODEL_DIR) -> bool:
 
 
 def _recognizer(model_dir: str):
-    if model_dir not in _recs:
-        import sherpa_onnx
-        _recs[model_dir] = sherpa_onnx.OfflineRecognizer.from_wenet_ctc(
-            model=os.path.join(model_dir, "model.int8.onnx"),
-            tokens=os.path.join(model_dir, "tokens.txt"),
-            num_threads=4,
-        )
-    return _recs[model_dir]
+    with _lock:
+        if model_dir not in _recs:
+            import sherpa_onnx
+            _recs[model_dir] = sherpa_onnx.OfflineRecognizer.from_wenet_ctc(
+                model=os.path.join(model_dir, "model.int8.onnx"),
+                tokens=os.path.join(model_dir, "tokens.txt"),
+                num_threads=4,
+            )
+        return _recs[model_dir]
 
 
 def transcribe(audio: Audio, model_dir: str = MODEL_DIR) -> str:
