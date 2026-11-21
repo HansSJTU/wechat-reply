@@ -5,6 +5,7 @@ Merges, per watched chat:
   data/bot.db             the bot's replies (native sends never reach WeChat's DB) and the 开启/关闭 state
   data/voice_stt.jsonl    the bot's transcription of each voice while the chat was 开启 (candidates + Mandarin)
   data/labels/            local model drafts and the human label of each voice
+  data/group_decisions.jsonl  the judge's verdict on each burst nobody @-ed the bot in (Decisions API probabilities)
 开启 / 关闭 markers are read back from the command messages, parsed as wxbot/pipeline.py does.
 Stdlib only (config via wxbot/config.py); everything stays on this machine.
 """
@@ -12,6 +13,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 
 from labeling.dataset import DRAFTS, LABELS, VOICE_STT
 from stt.paths import DATA
@@ -86,6 +88,44 @@ def _preview(m):
     return {"voice": "[语音]", "image": "[图片]", "video": "[视频]", "emoji": "[表情]"}.get(t, f"[{t}]")
 
 
+# the facts before hot_topic: older records name their needed facts only in the reason text
+FACTS = ("needs_response", "answerable", "share_to_group", "can_comment", "unanswered")
+CONF = re.compile(r"to=\w+ ([\d.]+), kind=\w+ ([\d.]+)")
+
+
+def _decisions(chat_id, msgs):
+    """The judge's verdicts for this chat, keyed by the local_id of the burst's last message. Records from
+    before "ids" was logged are matched by time: the last len(new) messages from others up to "at"."""
+    out = {}
+    others = [m for m in msgs if not m.get("is_self")]
+    for r in _jsonl(os.path.join(DATA, "group_decisions.jsonl")):
+        if r.get("chat") != chat_id:
+            continue
+        ids = [i for i in r.get("ids") or [] if i is not None]
+        if not ids:
+            at = time.mktime(time.strptime(r["at"], "%Y-%m-%d %H:%M:%S"))
+            burst = [m for m in others if m["time"] <= at + 1][-len(r.get("new") or [1]):]
+            ids = [m["local_id"] for m in burst]
+        if not ids:
+            continue
+        key, v = ids[-1], r.get("verdict")
+        if v is None:  # "reply model backed out": a note on the verdict already shown
+            if key in out:
+                out[key]["skipped"] = r.get("skipped")
+            continue
+        conf = v.get("conf")
+        if conf is None and (m := CONF.search(v.get("reason") or "")):
+            conf = {"to": float(m[1]), "kind": float(m[2])}
+        need = v.get("need")
+        if need is None:  # older records: the reason lists the needed facts, or all of them when none apply
+            listed = [k for k in FACTS if f"{k}=" in (v.get("reason") or "")]
+            need = [] if len(listed) == len(FACTS) else listed
+        out[key] = {"to": v.get("to"), "kind": v.get("kind"), "conf": conf or {}, "facts": v.get("facts") or {},
+                    "need": need, "rule": v.get("rule"), "p": v.get("p"), "th": v.get("th"), "voice": v.get("voice", False), "reply": v.get("reply"), "reason": v.get("reason"),
+                    "skipped": r.get("skipped"), "n": len(ids), "at": r["at"]}
+    return out
+
+
 def chat(chat_id: str) -> dict:
     cfg = load_config()
     on_words, off_words = switch_words(cfg)
@@ -104,6 +144,7 @@ def chat(chat_id: str) -> dict:
             m = json.loads(meta or "{}")
             if m.get("local_id") is not None:
                 seen[m["local_id"]] = text
+    decisions = _decisions(chat_id, msgs)
     name = msgs[0].get("chat_name") if msgs else chat_id
     is_group = chat_id.endswith("@chatroom")
     items, switches = [], []
@@ -120,6 +161,8 @@ def chat(chat_id: str) -> dict:
                       label=lab and {"wu": lab.get("wu"), "meaning": lab.get("meaning"), "status": lab.get("status")})
         if m["type"] == "image" and m.get("image_path"):
             it["image"] = os.path.basename(m["image_path"])
+        if m.get("local_id") in decisions:
+            it["decision"] = decisions[m["local_id"]]
         if m["type"] == "app":
             it["text"] = m.get("text") or m.get("title") or "[链接/文件]"
         items.append(it)
@@ -147,6 +190,9 @@ def chat(chat_id: str) -> dict:
     row = con and _switch_row(con, chat_id)
     current = bool(row[0]) if row else state
     periods.append({"from": t0, "to": None, "on": state})
+    g = cfg.get("group") or {}
     timeline = sorted(items + switches, key=lambda x: (x["time"], x["kind"] != "switch"))
     return {"chat": chat_id, "name": name, "is_group": is_group, "on": current, "periods": periods,
+            "threshold": float(g.get("reply_threshold", 0.75)), "fact_thresholds": g.get("fact_thresholds") or {},
+            "voice_threshold": float(g.get("voice_reply_threshold", 0.97)),
             "items": timeline}

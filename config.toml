@@ -28,8 +28,9 @@ command_stt = ["whisper-ft", "wu-ft"]  # while off, voices are heard by the firs
                             # models only, to catch a spoken 开启 (the transcript is not kept)
 
 [llm]                       # placeholder: OpenAI Responses API chat bot (key: openai_api_key in secrets/stt_keys.toml)
-model = "gpt-5.5"
-reasoning_effort = "medium"  # low skips the fallback search when the weather tool comes back empty
+model = "gpt-6.2-sol"        # 11-20 (chat/search/photo test, low effort): 11.7 s vs 23.9 s for gpt-6.1-terra
+                            # medium (the old config.local.toml setting) and 17.1 s for gpt-5.5 medium
+reasoning_effort = "low"    # gpt-5.5 at low skipped the fallback search when the weather tool came back empty
 max_images = 3              # only the newest N images in the window are attached
 web_search = true           # OpenAI built-in web search (weather, news, …); adds a few seconds when used
 location = { country = "CN", region = "Beijing", city = "Beijing" }   # where "today's weather" is
@@ -53,8 +54,9 @@ names = []                  # what the family calls the bot besides its WeChat n
 #     or quote someone else (emoji, links, @所有人 never count)
 #  2. wait_seconds after the last message, so people answer each other first (what they say joins the batch)
 #  3. judge (judge_api): decisions = OpenAI Decisions API (gpt-6-luna) answers who it is for, what it is, and
-#     a few facts (answerable? shared with everyone? anything specific to say? nobody answered yet?); the
-#     code replies when the facts that case needs all reach reply_threshold (wxbot/llm.py POLICY).
+#     a few facts (answerable? shared with everyone? anything specific to say? nobody answered yet? stocks/
+#     tech/politics/economy?); the code replies when the facts of one way that case
+#     allows all reach reply_threshold or their fact_thresholds (wxbot/llm.py POLICY).
 #     responses = a Responses call with judge_model that decides itself
 #  4. cooldowns: cooldown_minutes between unprompted replies, share_cooldown_minutes between replies to
 #     shared photos/life; skipped when the judge says the message was aimed at the bot
@@ -64,6 +66,11 @@ cooldown_minutes = 0         # 0 = off
 share_cooldown_minutes = 0  # 0 = off
 judge_api = "decisions"     # or "responses"
 reply_threshold = 0.75      # decisions: every needed fact must reach this; higher = quieter
+fact_thresholds = { answerable = 0.4 }  # per-fact overrides: a question you can half answer still gets
+                            # a reply (what you know, a view, or a kind word), not silence
+voice_reply_threshold = 0.97  # new messages that are only voices (not naming the bot): every needed
+                            # fact must also reach this, so the bot rarely cuts in on a voice chat.
+                            # Voice summaries ([summary]) are not affected
 judge_model = ""            # responses: "" = [llm] model
 judge_effort = "low"
 judge_context = 30          # lines of chat the judge sees
@@ -75,16 +82,19 @@ judge_prompt = """你在一个家庭微信群里，名字叫“{names}”。下�
 2. 对全群提的问题，答案确定、客观、你能说准（常识、知识、换算、日期、天气、可以查到的事实），而且群里还没人回答。
 3. 分享生活、照片，是发给全群的，等了一会儿还没人接话，就可以接一句：说出照片里具体的东西、笑一下接个梗，或者问一句相关的。别泛泛夸“真好看”，别长篇解说。
    不回的分享：已经有人接话了；是在给某个人看、接某个人的话（比如股票截图是在回应“中签了吗”）；转账、通知、文件截图。
+4. 群里在聊股票、科技、政治、经济、新闻时事，哪怕只是闲聊、感叹，都可以插一句（你能联网查最新的数据和新闻）。
 
 不说话的情况，包括但不限于：
 - 在问某个群成员，或回应某人刚说的话（叫了名字、称呼“妈”“爸”“你”等）
 - 主观的、家里的事：谁去接、吃什么、几点回来、要不要买，要家人自己定
-- 两三个人正聊得起劲，或者已经有人回答、接话了
+- 两三个人正聊得起劲，或者已经有人回答、接话了（第 4 种话题除外）
 - 表情、没听清的语音、转发的文章、通知、寒暄
 - 你最近刚说过话而大家没接"""
 mention_prompt = """你被 @ 了（或有人引用了你的话、在语音里叫了你的名字）：回应那条消息，结合前面的群聊理解。"""
 auto_prompt = """这次没人 @ 你，是你自己判断要插一句：{reason}
-只说这一点，一两句话，像家里人顺口说一句，别客套、别总结、别长篇解说。如果仔细看后发现没把握、答不准、已经有人回答了，或者其实是在问别人，就只输出 [不回]。"""
+只说这一点，一两句话，像家里人顺口说一句，别客套、别总结、别长篇解说。
+答不准也可以说：讲你知道的那部分、给个看法，或者接住对方的情绪（担心就宽宽心，感叹就一起感叹），只是别编数字和事实。
+如果仔细看后发现已经有人回答了，或者其实是在问别人，就只输出 [不回]。"""
 
 [summary]                   # groups that are 开启: sum up a run of voice messages for whoever couldn't listen
 auto = true                 # post one unasked once min_voices transcribed voices piled up since the last

@@ -38,9 +38,12 @@ MENTION = re.compile(r"@[^\s\u2005]+[\s\u2005]*")
 FILLER = " \u2005。.!！~～，,、？?：:"  # around a spoken 开启 / 关闭
 # what the reply model is told about why it is speaking up unasked (the Decisions API gives no reason text)
 AUTO_HINT = {"bot": "有人没 @ 你但在跟你说话，回应他。",
-             "question": "新消息里有个对大家提的问题，还没人回答，你能答准，就答这个问题。",
+             "question": "新消息里有个对大家提的问题，还没人回答：能答准就答；答不全就说你知道的、给个看法，"
+                         "或者接住提问人的情绪。",
              "share": "有人在分享生活、照片，还没人接话：接一句具体的——说出照片里的东西、接个梗，或问一句相关的；别泛泛夸“真好看”。",
              "chat": "群里在闲聊，你有一句真正有用的话可说。",
+             "topic": "群里在聊股票、科技、政治、经济这类话题，插一句有料的：最新的数字、来龙去脉，或者有依据的看法，"
+                      "拿不准的先联网查准；别附和、别说教。",
              "other": ""}
 DECISIONS = os.path.join(DATA, "group_decisions.jsonl")  # every unprompted-turn verdict, for tuning
 
@@ -213,9 +216,9 @@ class Pipeline:
             d = self._judge(chat, live, history, now)
             if not d:
                 return
-            extra = self.g.get("auto_prompt", "").replace("{reason}", AUTO_HINT.get(
-                "bot" if d["to"] == "bot" else d["kind"], "") + (f"（{d['reason']}）" if d.get("p") is None else ""))
-            auto = d["kind"] if d["to"] != "bot" else "bot"
+            auto = "bot" if d["to"] == "bot" else d.get("rule") or d["kind"]  # bot / question / share / topic
+            extra = self.g.get("auto_prompt", "").replace("{reason}", AUTO_HINT.get(auto, "") + (
+                f"（{d['reason']}）" if d.get("p") is None else ""))
         if group and self._members(chat):
             extra = "群成员：\n" + self._members(chat) + ("\n" + extra if extra else "")
         t = time.monotonic()
@@ -316,7 +319,8 @@ class Pipeline:
         t = time.monotonic()
         try:
             images = [h["image_path"] for h in history if h["time"] >= live[0]["time"] and h.get("image_path")]
-            d = llm.judge(self.cfg["llm"], g, self._transcript(history, live), images, self._members(chat))
+            voice = all(ev.get("type") == "voice" for ev in live if self._eligible(ev))
+            d = llm.judge(self.cfg["llm"], g, self._transcript(history, live), images, self._members(chat), voice)
         except Exception as e:
             log(f"[{chat}] judge failed: {type(e).__name__}: {e}")
             return None
@@ -353,7 +357,7 @@ class Pipeline:
         return ("之前的群聊：\n" + ("\n".join(old) or "（无）") + "\n\n新消息：\n" + "\n".join(new))
 
     def _record(self, chat, live, verdict, skipped):
-        rec = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "chat": chat,
+        rec = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "chat": chat, "ids": [ev.get("local_id") for ev in live],
                "new": [ev.get("_text") for ev in live], "verdict": verdict, "skipped": skipped}
         try:
             with open(DECISIONS, "a", encoding="utf-8") as f:

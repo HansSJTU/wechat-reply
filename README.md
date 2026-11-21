@@ -148,7 +148,9 @@ kqueue on message_*.db/-wal -> source.py -> pipeline.py (one thread per chat)
     Groups: an @ (or a quoted reply to the bot) is always answered; with `[group] auto` the bot may also
     speak up unasked — free rules first (no @-someone-else / emoji / links),
     then a `wait_seconds` pause so people answer each other, then a judge on the OpenAI Decisions API
-    (`gpt-6-luna`: who is it for, what is it, P(speak up) ≥ `reply_threshold`), then cooldowns; the reply
+    (`gpt-6-luna`: who is it for, what is it, and the probability of a few facts; it speaks up when every
+    fact of one rule in `wxbot/llm.py` POLICY reaches `reply_threshold` or its `fact_thresholds`, and at
+    least `voice_reply_threshold` when the new messages are all voices), then cooldowns; the reply
     model can still back out with `[不回]`. Every verdict goes to `data/group_decisions.jsonl`.
     The LLM's context starts at the 开启.
   - 关闭: record only — no cloud STT, no LLM, nothing leaves the machine. Voices are heard by a local

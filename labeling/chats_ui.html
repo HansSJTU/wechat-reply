@@ -46,7 +46,8 @@ header .sub { color: var(--muted); font-size: 12px; }
 .strip .tick { position: absolute; top: 2px; width: 2px; height: 16px; background: var(--ink); opacity: .55; }
 .strip .ends { position: absolute; left: 0; right: 0; bottom: 0; display: flex; justify-content: space-between;
   font-size: 10px; color: var(--muted); }
-.legend { font-size: 11px; color: var(--muted); display: flex; gap: 12px; }
+.legend { font-size: 11px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 12px; }
+.legend > span { white-space: nowrap; }
 .legend i { display: inline-block; width: 10px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
 #log { flex: 1; overflow-y: auto; padding: 14px 18px 30px; background: var(--bg); }
 .tsep { text-align: center; color: var(--muted); font-size: 11px; margin: 14px 0 8px; }
@@ -79,12 +80,28 @@ header .sub { color: var(--muted); font-size: 12px; }
 .stt td { padding: 1px 8px 1px 0; vertical-align: top; }
 .stt td:first-child { color: var(--muted); white-space: nowrap; font-size: 11.5px; }
 .stt .err { color: var(--warn); }
+.dec { margin-top: 6px; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px;
+  font-size: 12px; width: 440px; max-width: 100%; }
+.dec .hd { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; }
+.dec .v { font-size: 10.5px; padding: 0 6px; border-radius: 8px; color: #fff; background: var(--off); }
+.dec .v.yes { background: var(--on); }
+.dec .q { color: var(--muted); }
+.dec .q b { color: var(--ink); font-weight: 500; }
+.dec .facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px 12px; margin-top: 5px; }
+.dec .f { display: grid; grid-template-columns: auto 1fr auto; gap: 5px; align-items: center; opacity: .5; }
+.dec .f.need { opacity: 1; font-weight: 500; }
+.dec .f .bar { height: 5px; border-radius: 3px; background: var(--line); position: relative; overflow: hidden; }
+.dec .f .bar i { position: absolute; inset: 0 auto 0 0; background: var(--muted); }
+.dec .f.need .bar i { background: var(--warn); }
+.dec .f.need.ok .bar i { background: var(--on); }
+.dec .f .n { font-variant-numeric: tabular-nums; font-size: 11px; }
 .empty { color: var(--muted); padding: 40px; text-align: center; }
 @media (max-width: 720px) {
   .app { flex-direction: column; }
   aside { width: auto; height: auto; max-height: 34vh; border-right: 0; border-bottom: 1px solid var(--line); }
   #log { padding: 12px 16px 24px; }
   .m .body { max-width: 82%; }
+  .dec .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 </style>
 </head>
@@ -167,6 +184,34 @@ function sttCard(i, c) {
   return `<div class="stt">${top}${lab}${rows ? `<details><summary>各识别器的结果（${cand.length + local.length}）</summary><table>${rows}</table></details>` : ""}</div>`;
 }
 
+const TO = {bot: "跟机器人说", member: "跟某人说", group: "对全群", none: "自言自语/表态"};
+const KIND = {question: "问问题", share: "分享", chat: "闲聊", other: "其他"};
+const FACT = {needs_response: "要回应", answerable: "能答准", share_to_group: "在分享", can_comment: "能接话", unanswered: "没人接",
+  hot_topic: "聊时事"};
+const RULE = {bot: "跟它说话", question: "答问题", share: "接分享", topic: "聊时事"};
+const f2 = x => x == null ? "–" : Number(x).toFixed(2);
+
+function decCard(dc, c) {
+  const spoke = dc.reply && !dc.skipped;
+  const verdict = spoke ? "开口" : dc.reply ? "想开口，没说" : "不开口";
+  const why = dc.skipped && dc.skipped !== "judge: no" ? ` · ${esc(dc.skipped)}` : "";
+  const th = k => Math.max(c.fact_thresholds[k] ?? c.threshold, dc.voice ? c.voice_threshold : 0);
+  const rule = dc.need.length ? `${dc.rule ? `按「${RULE[dc.rule] || dc.rule}」` : ""}最弱 ${f2(dc.p)} / 阈值 ${f2(dc.th ?? c.threshold)}`
+    : "这类不主动说";
+  const facts = Object.entries(FACT).filter(([k]) => k in dc.facts).map(([k, lab]) => {
+    const v = dc.facts[k], need = dc.need.includes(k);
+    return `<div class="f ${need ? "need" : ""} ${need && v >= th(k) ? "ok" : ""}" title="${k} · 阈值 ${f2(th(k))}${need ? "（这次要看的）" : ""}">
+      <span>${lab}</span><span class="bar"><i style="width:${Math.round((v || 0) * 100)}%"></i></span><span class="n">${f2(v)}</span></div>`;
+  }).join("");
+  return `<div class="dec" title="${esc(dc.reason || "")}">
+    <div class="hd"><span class="v ${spoke ? "yes" : ""}">${verdict}</span>
+      <span class="q">对象 <b>${esc(TO[dc.to] || dc.to)}</b> ${f2(dc.conf.to)}</span>
+      <span class="q">类型 <b>${esc(KIND[dc.kind] || dc.kind)}</b> ${f2(dc.conf.kind)}</span>
+      ${dc.voice ? `<span class="q">全是语音，阈值至少 ${f2(c.voice_threshold)}</span>` : ""}
+      <span class="q">${rule}${why}${dc.n > 1 ? ` · 合判 ${dc.n} 条` : ""}</span></div>
+    <div class="facts">${facts}</div></div>`;
+}
+
 function msg(i, c) {
   const right = i.bot || i.self;
   const who = i.bot ? "莫名其妙" : i.self ? "本账号（手动）" : i.sender;
@@ -179,6 +224,7 @@ function msg(i, c) {
   } else {
     inner = `<div class="bub">${esc(i.text ?? `[${i.type}]`)}</div>`;
   }
+  if (i.decision) inner += decCard(i.decision, c);
   const off = !i.bot && !i.self && !onAt(c, i.time);
   return `<div class="m ${right ? "right" : ""} ${off ? "offp" : ""}">
     <div class="av" style="background:${right ? "#888" : color(who)}">${esc(initial(who))}</div>
@@ -188,7 +234,8 @@ function msg(i, c) {
 async function loadChat(scroll) {
   if (!sel) return;
   const c = await fetch("/api/chat?c=" + encodeURIComponent(sel)).then(r => r.json());
-  const sig = JSON.stringify([c.on, c.items.length, c.items.filter(i => i.mandarin || i.label).length]);
+  const sig = JSON.stringify([c.on, c.items.length, c.items.filter(i => i.mandarin || i.label).length,
+    c.items.filter(i => i.decision).length]);
   if (sig === last && !scroll) return;
   last = sig;
   const lastSw = [...c.items].reverse().find(i => i.kind === "switch");
@@ -197,7 +244,8 @@ async function loadChat(scroll) {
       <span class="sub">${c.is_group ? "群：@莫名其妙 才回复" : "私聊：每条都回复"} · 发${c.is_group ? "「@莫名其妙 开启/关闭」" : "「开启/关闭」"}切换
       ${lastSw ? ` · 最近一次切换：${day(lastSw.time)} ${hm(lastSw.time)}，${esc(lastSw.by.replace(/[（）]/g, ""))}${lastSw.on ? "开启" : "关闭"}` : ""}</span></div>
     ${strip(c)}
-    <div class="legend"><span><i style="background:var(--on)"></i>开启：语音转文字、会回复</span><span><i style="background:var(--off)"></i>关闭：只记录</span><span>竖线：切换</span></div>`;
+    <div class="legend"><span><i style="background:var(--on)"></i>开启：语音转文字、会回复</span><span><i style="background:var(--off)"></i>关闭：只记录</span><span>竖线：切换</span>
+      ${c.is_group ? `<span>判断卡：<i style="background:var(--on)"></i>达标 <i style="background:var(--warn)"></i>没达标 <i style="background:var(--muted);opacity:.5"></i>这类不看</span>` : ""}</div>`;
   const log = $("#log"), atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
   let html = "", prev = 0;
   for (const i of c.items) {

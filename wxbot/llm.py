@@ -138,20 +138,27 @@ FACTS = {
     "share_to_group": "新消息是有人在给全群分享生活、照片或见闻，而不是在跟某个人说话、回应某人的问题，也不是转账、通知。",
     "can_comment": "你能针对新消息里的照片或内容，说出一句具体、自然、不客套的话。",
     "unanswered": "新消息里的问题或分享，在新消息里还没有别人回答或接话。",
+    "hot_topic": "新消息在聊股票、科技、政治、经济或新闻时事（股市涨跌、公司、AI、国际局势、政策等），不是家里的私事。",
 }
-# which facts must all hold, per (to, kind); anything else (to=member, chat, other) stays quiet
-POLICY = {"bot": ["needs_response"], "question": ["answerable", "unanswered"],
-          "share": ["share_to_group", "can_comment", "unanswered"]}
+# per (to, kind): ways to speak up, each a set of facts that must all hold; the best-scoring one counts.
+# to=member and anything not listed (other) stays quiet. "topic": joining any stock/tech/politics/economy chat
+# (a "can you add something?" fact scored 0.05-0.19 on the 11-20 stock chat, so the reply model decides that)
+POLICY = {"bot": {"bot": ["needs_response"]},
+          "question": {"question": ["answerable", "unanswered"], "topic": ["hot_topic"]},
+          "share": {"share": ["share_to_group", "can_comment", "unanswered"], "topic": ["hot_topic"]},
+          "chat": {"topic": ["hot_topic"]}}
 
 
-def judge(cfg, gcfg, transcript, images=(), members=""):
+def judge(cfg, gcfg, transcript, images=(), members="", voice=False):
     """Should the bot speak up in a group nobody @-ed it in? cfg: [llm], gcfg: [group].
     transcript: plain text (earlier lines, then the new ones); images: the new burst's images (newest
-    few); members: who is who in this group ([group.members]).
-    Returns {to, kind, reply, reason, p}. [group] judge_api picks the endpoint:
+    few); members: who is who in this group ([group.members]); voice: the new messages that count are all
+    voices (none naming the bot, or it would not be here), so every fact must also reach voice_reply_threshold.
+    Returns {to, kind, reply, reason, p, rule}. [group] judge_api picks the endpoint:
       decisions  OpenAI Decisions API (gpt-6-luna), ~0.3 s, input-only billing: who is it for, what is it,
-                 and the FACTS; reply when every fact POLICY needs for that case has P >= reply_threshold
-                 (p = the weakest of them)
+                 and the FACTS; reply when, for one of the ways POLICY allows in that case, every fact has
+                 P >= its threshold (fact_thresholds, else reply_threshold); rule = the way that comes
+                 closest, p / th = its weakest fact relative to its threshold, and that threshold
       responses  a Responses API call with a JSON schema (judge_model, judge_effort), with a reason"""
     rules = gcfg["judge_prompt"].replace("{names}", "、".join(gcfg.get("names") or ["（未设置）"]))
     if members:
@@ -171,7 +178,7 @@ def judge(cfg, gcfg, transcript, images=(), members=""):
             body["reasoning"] = {"effort": gcfg["judge_effort"]}
         text, _ = _post(tcfg, body)
         d = json.loads(text)
-        return {**{k: d.get(k) for k in JUDGE_SCHEMA["required"]}, "p": None}
+        return {**{k: d.get(k) for k in JUDGE_SCHEMA["required"]}, "p": None, "rule": None}
     body = {"model": "gpt-6-luna",
             "input": [{"role": "developer", "content": rules + "\n" + _now()},
                       {"role": "user", "content": content}],
@@ -190,10 +197,18 @@ def judge(cfg, gcfg, transcript, images=(), members=""):
         raise RuntimeError(f"decisions: missing or refused answer: {a}")
     to, kind = a["to"]["choice"], a["kind"]["choice"]
     facts = {k: float(a[k]["probability"]) for k in FACTS}
-    need = [] if to == "member" else POLICY.get("bot" if to == "bot" else kind, [])
-    p = min((facts[k] for k in need), default=0.0)
+    ways = {} if to == "member" else POLICY.get("bot" if to == "bot" else kind, {})
+    base = float(gcfg.get("reply_threshold", 0.75))
+    th = {k: float((gcfg.get("fact_thresholds") or {}).get(k, base)) for k in FACTS}
+    if voice:
+        th = {k: max(v, float(gcfg.get("voice_reply_threshold", 0.97))) for k, v in th.items()}
+    rule, need = max(ways.items(), key=lambda w: min(facts[k] - th[k] for k in w[1]), default=(None, []))
+    weak = min(need, key=lambda k: facts[k] - th[k], default=None)
+    p, p_th = (facts[weak], th[weak]) if weak else (0.0, base)
+    shown = {k for w in ways.values() for k in w}
     reason = (f"{TO[to].split('：')[0]}，{KIND[kind]}（to={to} {a['to'].get('confidence', 0):.2f}, "
               f"kind={kind} {a['kind'].get('confidence', 0):.2f}; "
-              + " ".join(f"{k}={v:.2f}" for k, v in facts.items() if k in need or not need) + "）")
-    return {"to": to, "kind": kind, "reply": bool(need) and p >= float(gcfg.get("reply_threshold", 0.75)),
-            "reason": reason, "p": p, "facts": facts}
+              + " ".join(f"{k}={v:.2f}" for k, v in facts.items() if k in shown or not shown) + "）")
+    return {"to": to, "kind": kind, "reply": bool(need) and p >= p_th,
+            "reason": reason, "p": p, "th": p_th, "facts": facts, "need": need, "rule": rule, "voice": voice,
+            "conf": {"to": a["to"].get("confidence"), "kind": a["kind"].get("confidence")}}
