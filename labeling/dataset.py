@@ -34,7 +34,10 @@ GLOSSARY_SEED = [
 # Clips from other sources (labeling/sources/): one JSON line each with key, wav, seconds,
 # source, sender, split (always train), prompt (on-screen Mandarin) and prefill (proposed 余姚话).
 EXTRA = os.path.join(LABEL_DIR, "extra_clips.jsonl")
-DRAFTERS = ["whisper-wu", "wu-local", "wu-ft", "whisper-ft"]
+# Local ASR drafts for the labeling page, best first (the first one prefills the box). The released base
+# models (whisper-wu, wu-local) were dropped 2026-11-20: older clips still carry their drafts in
+# drafts.json, which shown_drafts() leaves out.
+DRAFTERS = ["whisper-ft", "wu-ft"]
 # done: exported to its split · skip: unclear · bad: broken audio · exclude: labeled or not, kept out of
 # both train and test on purpose (private, a test message to the bot, not representative …)
 STATUSES = ("done", "skip", "bad", "exclude")
@@ -107,7 +110,13 @@ def _load_json(path, default):
 
 
 def drafts() -> dict:
+    """Everything in drafts.json (draft() rewrites the whole file, so nothing in it is dropped)."""
     return _load_json(DRAFTS, {})
+
+
+def shown_drafts() -> dict:
+    """drafts() limited to the current DRAFTERS: what the pages and the clip builders use."""
+    return {k: {n: t for n, t in v.items() if n in DRAFTERS} for k, v in drafts().items()}
 
 
 def labels() -> dict:

@@ -15,7 +15,7 @@ import re
 import sqlite3
 import time
 
-from labeling.dataset import DRAFTS, LABELS, VOICE_STT, _jsonl
+from labeling.dataset import DRAFTERS, DRAFTS, LABELS, VOICE_STT, _jsonl
 from stt.paths import DATA
 from wxbot.config import load_config, switch_words
 
@@ -141,8 +141,8 @@ def chat(chat_id: str) -> dict:
     msgs = [m for m in _jsonl(os.path.join(DATA, "messages.jsonl")) if m["chat"] == chat_id]
     stt = {r["key"]: r for r in _jsonl(VOICE_STT) if r.get("chat") == chat_id}
     if os.path.exists(DRAFTS):
-        with open(DRAFTS, encoding="utf-8") as f:
-            drafts = json.load(f)
+        with open(DRAFTS, encoding="utf-8") as f:  # retired drafters' entries left out, as on the labeling page
+            drafts = {k: {n: t for n, t in v.items() if n in DRAFTERS} for k, v in json.load(f).items()}
     else:
         drafts = {}
     labels = {}

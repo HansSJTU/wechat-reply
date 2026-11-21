@@ -78,12 +78,10 @@ class TestLabeling(unittest.TestCase):
                 f.write(json.dumps({"type": "voice", "voice_path": wav_p, "voice_ms": 1000, "time": 100}) + "\n")
                 f.write('{"type": "voice", "half')
             with open(drafts_p, "w", encoding="utf-8") as f:
-                json.dump({"1_voice.wav": {"wu-local": "侬好"}}, f)
+                json.dump({"1_voice.wav": {"wu-ft": "侬好", "wu-local": "侬好"}}, f)
 
-            fake_providers = {
-                "wu-local": SimpleNamespace(ready=lambda: True, run=MagicMock(return_value="侬好")),
-                "wu-ft": SimpleNamespace(ready=lambda: False, run=MagicMock()),
-                "whisper-wu": SimpleNamespace(ready=lambda: False, run=MagicMock()),
+            fake_providers = {  # whisper-ft missing: the clip must not be redone for it every 30 s
+                "wu-ft": SimpleNamespace(ready=lambda: True, run=MagicMock(return_value="侬好")),
                 "whisper-ft": SimpleNamespace(ready=lambda: False, run=MagicMock()),
             }
             audio_ctor = MagicMock()
@@ -95,6 +93,9 @@ class TestLabeling(unittest.TestCase):
                  patch("stt.audio.Audio", audio_ctor):
                 self.assertEqual(dataset.draft(log=lambda *_: None), 0)
                 self.assertEqual(audio_ctor.call_count, 0)
+                # a retired drafter's entry stays in the file but is not shown
+                self.assertIn("wu-local", dataset.drafts()["1_voice.wav"])
+                self.assertEqual(dataset.shown_drafts(), {"1_voice.wav": {"wu-ft": "侬好"}})
 
     def test_chat_view_dynamic_name_voice_switch_and_db_close(self):
         with tempfile.TemporaryDirectory() as d:

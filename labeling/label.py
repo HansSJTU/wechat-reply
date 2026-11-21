@@ -27,8 +27,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from labeling import chat_view  # noqa: E402
 from labeling.dataset import (DRAFTERS, LABEL_DIR, LABELS, LABELS_LOCK, STATUSES, DRAFT_LOCK, bot_stt,  # noqa: E402
-                              draft, drafts, export, glossary, glossary_prompt, labels, meanings, save_glossary,
-                              split_for, vocab, voices)
+                              draft, export, glossary, glossary_prompt, labels, meanings, save_glossary,
+                              shown_drafts, split_for, vocab, voices)
 from labeling.llm import llm_json  # noqa: E402
 from stt.paths import DATA  # noqa: E402
 from urllib.parse import parse_qs, unquote, urlparse  # noqa: E402
@@ -102,7 +102,7 @@ class Handler(BaseHTTPRequestHandler):
             with open(os.path.join(HERE, "label_ui.html"), "rb") as f:
                 self._send(200, f.read(), "text/html; charset=utf-8")
         elif path == "/api/items":
-            d, lab, mean, bot = drafts(), labels(), meanings(), bot_stt()
+            d, lab, mean, bot = shown_drafts(), labels(), meanings(), bot_stt()
 
             def cloud(key):  # the bot's cloud candidates (local ones are drafted here anyway)
                 c = (bot.get(key) or {}).get("candidates") or {}

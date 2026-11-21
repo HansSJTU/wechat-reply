@@ -168,7 +168,7 @@ function onAt(c, t) {
 
 function sttCard(i, c) {
   const names = {"volc-file-2": "火山", "deepseek": "DeepSeek", "openai": "OpenAI", "whisper-ft": "whisper-ft",
-    "wu-ft": "wu-ft", "whisper-wu": "whisper-wu", "wu-local": "wu-local"};
+    "wu-ft": "wu-ft"};
   let top;
   if (i.mandarin) top = `<div class="md">${esc(i.mandarin)}</div>`;
   else if (i.stt_error) top = `<div class="err">识别失败：${esc(i.stt_error)}</div>`;
@@ -177,7 +177,7 @@ function sttCard(i, c) {
     ? `<div class="lab"><span class="chip">已标注</span>${esc(i.label.wu)}${i.label.meaning ? `<span style="color:var(--muted)"> · ${esc(i.label.meaning)}</span>` : ""}</div>`
     : `<div class="lab"><span class="chip">待标注</span></div>`;
   const cand = Object.entries(i.candidates || {});
-  const local = ["whisper-ft", "wu-ft", "whisper-wu", "wu-local"].filter(k => i.local?.[k] != null && !(k in (i.candidates || {})))
+  const local = ["whisper-ft", "wu-ft"].filter(k => i.local?.[k] != null && !(k in (i.candidates || {})))
     .map(k => [k, i.local[k]]);
   const rows = [...cand, ...local].map(([k, v]) =>
     `<tr><td>${esc(names[k] || k)}${cand.some(c => c[0] === k) ? "" : "（本地草稿）"}</td><td>${esc(v)}</td></tr>`).join("");
