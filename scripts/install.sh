@@ -80,6 +80,9 @@ cat > "$PLIST" <<EOF
   <dict>
     <key>PATH</key><string>$(dirname "$UV"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>PYTHONUNBUFFERED</key><string>1</string>
+    <!-- macOS malloc otherwise keeps memory freed while a model loads (~1.4 GB for whisper-ft) cached for
+         the life of the process; measured 2026-11-20: same decode speed without the cache -->
+    <key>MallocLargeCache</key><string>0</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

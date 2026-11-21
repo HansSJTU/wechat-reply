@@ -166,6 +166,21 @@ def _load(ckpt: str = OPENAI_CKPT):
         return _models[ckpt]
 
 
+def unload():
+    """Drop the loaded models and give their GPU memory back (the labeling server drafts only now and then;
+    the bot keeps them)."""
+    with _lock:
+        if not _models:
+            return
+        _models.clear()
+    import gc
+
+    import torch
+    gc.collect()
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+
+
 def _split_pcm(pcm, max_samples: int = MAX_SAMPLES, slack: int = 5 * 16000):
     """Split audio longer than Whisper's 30 s window into near-equal chunks, each cut at the quietest
     100 ms within ±5 s of the even split point, so no chunk is a near-silent sliver (Whisper

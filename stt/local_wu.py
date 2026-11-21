@@ -40,6 +40,12 @@ def _recognizer(model_dir: str):
         return _recs[model_dir]
 
 
+def unload():
+    """Drop the loaded recognizers (see local_whisper_wu.unload)."""
+    with _lock:
+        _recs.clear()
+
+
 def transcribe(audio: Audio, model_dir: str = MODEL_DIR) -> str:
     samples = array.array("h", audio.pcm)  # 16-bit little-endian mono
     rec = _recognizer(model_dir)

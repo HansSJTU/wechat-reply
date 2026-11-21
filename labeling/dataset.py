@@ -11,6 +11,7 @@ import json
 import os
 import re
 import threading
+import time
 import wave
 
 from stt.paths import DATA, GLOSSARY, LABELS as LABEL_DIR, WU_TOKENS as TOKENS
@@ -18,6 +19,7 @@ from stt.paths import DATA, GLOSSARY, LABELS as LABEL_DIR, WU_TOKENS as TOKENS
 MESSAGES = os.path.join(DATA, "messages.jsonl")
 RESULTS = os.path.join(DATA, "stt_results.jsonl")
 VOICE_STT = os.path.join(DATA, "voice_stt.jsonl")
+VOICE_LOCAL = os.path.join(DATA, "voice_local.jsonl")  # 关闭 chats: local models only
 DRAFTS = os.path.join(LABEL_DIR, "drafts.json")
 LABELS = os.path.join(LABEL_DIR, "labels.jsonl")
 EXPORT_DIR = os.path.join(LABEL_DIR, "wenet")
@@ -128,6 +130,12 @@ def bot_stt() -> dict:
     return {r["key"]: r for r in _jsonl(VOICE_STT)}
 
 
+def bot_heard() -> dict:
+    """Every voice the bot ran its local models on: 开启 (voice_stt.jsonl) and 关闭 (voice_local.jsonl,
+    whisper-ft / wu-ft only). key -> record with "candidates"; 开启 wins if both exist."""
+    return {**{r["key"]: r for r in _jsonl(VOICE_LOCAL)}, **bot_stt()}
+
+
 def meanings() -> dict:
     """Mandarin glosses given earlier as CLI references (-e), keyed by file name."""
     return {r["file"]: r["expect"] for r in _jsonl(RESULTS) if r.get("expect")}
@@ -173,33 +181,68 @@ def vocab() -> set:
         return {ln.split()[0] for ln in f if ln.strip()}
 
 
-def draft(keys: list[str] | None = None, log=print) -> int:
-    """Fill drafts for voices that have none (or only `keys`). Loads the local models once."""
+BOT_GRACE = 120  # s: the bot transcribes a new voice in a 开启 chat within seconds; wait for that first
+
+
+def _bot_text(rec, name):
+    """The bot's own result of local model `name` for this voice (its "candidates"), if usable."""
+    t = ((rec or {}).get("candidates") or {}).get(name)
+    return t if t and not t.startswith("✗") else None
+
+
+def _release_models():
+    from stt import local_whisper_wu, local_wu
+    local_whisper_wu.unload()
+    local_wu.unload()
+
+
+def draft(keys: list[str] | None = None, log=print, now: float | None = None) -> int:
+    """Fill drafts for voices that have none (or only `keys`).
+
+    The bot already runs the same models (whisper-ft, wu-ft) on every voice it receives, 开启 or 关闭:
+    those results are taken from voice_stt.jsonl / voice_local.jsonl as they are. The models run here only
+    for the rest (voices from before those files, a model that failed in the bot, clips from other sources)
+    and are released afterwards, so the labeling server does not hold a second copy of Whisper."""
     from stt.audio import Audio
     from stt.core import PROVIDERS
     with DRAFT_LOCK:
-        ready = [n for n in DRAFTERS if PROVIDERS[n].ready()]
-        if not ready:
-            return 0
-        d = drafts()
-        todo = [v for v in voices() if (keys is None or v["key"] in keys)
-                and any(n not in d.get(v["key"], {}) for n in ready)][::-1]  # page order: newest / top first
-        for v in todo:
-            a = Audio(v["wav"])
-            got = d.setdefault(v["key"], {})
-            for n in ready:
-                if n in got:
-                    continue
-                try:
-                    got[n] = PROVIDERS[n].run(a)
-                except Exception as e:
-                    got[n] = ""
-                    log(f"{v['key']} {n}: {type(e).__name__}: {e}")
-            os.makedirs(LABEL_DIR, exist_ok=True)
-            with open(DRAFTS + ".tmp", "w", encoding="utf-8") as f:
-                json.dump(d, f, ensure_ascii=False, indent=1)
-            os.replace(DRAFTS + ".tmp", DRAFTS)
-            log(f"drafted {v['key']}: {got.get(ready[0], '')}")
+        now = time.time() if now is None else now
+        ready = {n for n in DRAFTERS if PROVIDERS[n].ready()}
+        d, bot = drafts(), bot_heard()
+
+        def missing(v):
+            have, rec = d.get(v["key"], {}), bot.get(v["key"])
+            return [n for n in DRAFTERS if n not in have and (n in ready or _bot_text(rec, n))]
+
+        def waiting(v):  # a new WeChat voice the bot is likely transcribing right now
+            return v.get("source") == "wechat" and v["key"] not in bot and now - (v.get("time") or 0) < BOT_GRACE
+
+        todo = [v for v in voices() if (keys is None or v["key"] in keys) and missing(v) and not waiting(v)][::-1]
+        ran = False  # page order: newest / top first
+        try:
+            for v in todo:
+                names, rec, audio = missing(v), bot.get(v["key"]), None
+                got = d.setdefault(v["key"], {})
+                for n in names:
+                    if (t := _bot_text(rec, n)) is not None:
+                        got[n] = t
+                        continue
+                    audio = audio or Audio(v["wav"])
+                    ran = True
+                    try:
+                        got[n] = PROVIDERS[n].run(audio)
+                    except Exception as e:
+                        got[n] = ""
+                        log(f"{v['key']} {n}: {type(e).__name__}: {e}")
+                os.makedirs(LABEL_DIR, exist_ok=True)
+                with open(DRAFTS + ".tmp", "w", encoding="utf-8") as f:
+                    json.dump(d, f, ensure_ascii=False, indent=1)
+                os.replace(DRAFTS + ".tmp", DRAFTS)
+                src = "" if audio else " (from the bot)"
+                log(f"drafted {v['key']}{src}: {got.get(DRAFTERS[0], '')}")
+        finally:
+            if ran:
+                _release_models()
         return len(todo)
 
 

@@ -88,6 +88,8 @@ class TestLabeling(unittest.TestCase):
             with patch.object(dataset, "MESSAGES", msg_p), \
                  patch.object(dataset, "DRAFTS", drafts_p), \
                  patch.object(dataset, "LABEL_DIR", d), \
+                 patch.object(dataset, "VOICE_STT", os.path.join(d, "voice_stt.jsonl")), \
+                 patch.object(dataset, "VOICE_LOCAL", os.path.join(d, "voice_local.jsonl")), \
                  patch.object(dataset, "extras", lambda: {}), \
                  patch("stt.core.PROVIDERS", fake_providers), \
                  patch("stt.audio.Audio", audio_ctor):
@@ -96,6 +98,52 @@ class TestLabeling(unittest.TestCase):
                 # a retired drafter's entry stays in the file but is not shown
                 self.assertIn("wu-local", dataset.drafts()["1_voice.wav"])
                 self.assertEqual(dataset.shown_drafts(), {"1_voice.wav": {"wu-ft": "侬好"}})
+
+    def test_draft_reuses_bot_results_and_runs_models_only_for_the_rest(self):
+        now = 10_000.0
+        with tempfile.TemporaryDirectory() as d:
+            msg_p, drafts_p, stt_p = (os.path.join(d, f) for f in ("messages.jsonl", "drafts.json", "voice_stt.jsonl"))
+            voices = {"on.wav": now - 600, "off.wav": now - 600, "new.wav": now - 5}  # key -> message time
+            with open(msg_p, "w", encoding="utf-8") as f:
+                for key, t in voices.items():
+                    wav = os.path.join(d, key)
+                    open(wav, "wb").close()
+                    f.write(json.dumps({"type": "voice", "voice_path": wav, "voice_ms": 1000, "time": t}) + "\n")
+            with open(stt_p, "w", encoding="utf-8") as f:  # the bot transcribed on.wav (wu-ft failed there)
+                f.write(json.dumps({"key": "on.wav", "candidates": {"whisper-ft": "侬好", "wu-ft": "✗ timeout"}}) + "\n")
+            local_p = os.path.join(d, "voice_local.jsonl")
+            with open(local_p, "w", encoding="utf-8") as f:  # 关闭 chat: whisper-ft heard it, wu-ft was not ready
+                f.write(json.dumps({"key": "off.wav", "candidates": {"whisper-ft": "关闭里听到的"}}) + "\n")
+            runs = []
+            fake_providers = {n: SimpleNamespace(ready=lambda: True,
+                                                 run=lambda a, n=n: runs.append((a, n)) or f"{n}-local")
+                              for n in ("whisper-ft", "wu-ft")}
+            released = MagicMock()
+            with patch.object(dataset, "MESSAGES", msg_p), \
+                 patch.object(dataset, "DRAFTS", drafts_p), \
+                 patch.object(dataset, "LABEL_DIR", d), \
+                 patch.object(dataset, "VOICE_STT", stt_p), \
+                 patch.object(dataset, "VOICE_LOCAL", local_p), \
+                 patch.object(dataset, "extras", lambda: {}), \
+                 patch.object(dataset, "_release_models", released), \
+                 patch("stt.core.PROVIDERS", fake_providers), \
+                 patch("stt.audio.Audio", lambda p: os.path.basename(p)):
+                self.assertEqual(dataset.draft(log=lambda *_: None, now=now), 2)  # new.wav waits for the bot
+                got = dataset.drafts()
+                self.assertEqual(got["on.wav"], {"whisper-ft": "侬好", "wu-ft": "wu-ft-local"})
+                self.assertEqual(got["off.wav"], {"whisper-ft": "关闭里听到的", "wu-ft": "wu-ft-local"})
+                self.assertNotIn("new.wav", got)
+                self.assertEqual(sorted(runs), [("off.wav", "wu-ft"), ("on.wav", "wu-ft")])
+                released.assert_called_once()
+
+                # only bot results to take: no model runs, nothing to release
+                runs.clear(), released.reset_mock()
+                with open(stt_p, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"key": "new.wav", "candidates": {"whisper-ft": "a", "wu-ft": "b"}}) + "\n")
+                self.assertEqual(dataset.draft(log=lambda *_: None, now=now), 1)
+                self.assertEqual(dataset.drafts()["new.wav"], {"whisper-ft": "a", "wu-ft": "b"})
+                self.assertEqual(runs, [])
+                released.assert_not_called()
 
     def test_chat_view_dynamic_name_voice_switch_and_db_close(self):
         with tempfile.TemporaryDirectory() as d:

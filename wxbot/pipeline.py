@@ -10,7 +10,9 @@ start on and `listen` ones off.
        and the Mandarin go to data/voice_stt.jsonl, the Mandarin into the conversation. 1:1 chats are
        answered every time. Groups: an @ of this account (or a quoted reply to it) is always answered;
        with [group] auto the bot may also speak up unasked, but sparingly (see _judge).
-  off  nothing leaves the machine: no STT, no LLM, no reply; messages are only recorded.
+  off  nothing leaves the machine: no cloud STT, no LLM, no reply; messages are only recorded. Voices are
+       heard by the local models (whisper-ft, wu-ft) only, to catch a spoken 开启; their text is kept in
+       data/voice_local.jsonl for the labeling page and nowhere else.
 Either way every voice is saved (data/media, messages.jsonl) and the labeling page drafts it with the local
 models.
 """
@@ -27,7 +29,7 @@ from .config import switch_words
 from .log import log
 from .paths import DATA, ROOT
 from .sender import NotReady
-from .understand import understand
+from .understand import LOCAL_MODELS, transcribe_local, understand
 
 try:
     from stt import PROVIDERS as STT_PROVIDERS, transcribe as stt_transcribe
@@ -99,18 +101,20 @@ class Pipeline:
         return self.store.is_on(chat, ev.get("reply"))
 
     def _spot(self, chat, ev):
-        """关闭: listen for a spoken 开启 with a local-only model (the first ready one of [reply] command_stt).
-        The transcript is used for that check alone: not stored, not logged, not sent anywhere."""
+        """关闭: the local models (whisper-ft, wu-ft) hear the voice. Their text stays on this machine: it is
+        kept in data/voice_local.jsonl for the labeling page's drafts and used here only to catch a spoken
+        开启 (the first of [reply] command_stt that heard something); no LLM, no reply, nothing sent."""
         wanted = self.r.get("command_stt", ["whisper-ft", "wu-ft"])
         wanted = [wanted] if isinstance(wanted, str) else wanted
-        provider = next((p for p in wanted if p in STT_PROVIDERS and STT_PROVIDERS[p].ready()), None)
-        if not provider or stt_transcribe is None:
-            log(f"[{chat}] command spotting: none of {wanted} is ready")
+        if stt_transcribe is None:
+            log(f"[{chat}] command spotting: local speech models not installed")
             return None
-        r = stt_transcribe(ev["voice_path"], provider)
-        if r.error:
-            log(f"[{chat}] command spotting ({provider}) failed: {r.error}")
-        return f"[语音] {r.text}" if r.text else None
+        heard = transcribe_local(ev, tuple(dict.fromkeys([*LOCAL_MODELS, *wanted])))
+        text = next((heard[p] for p in wanted if heard.get(p)), None)
+        if not heard:
+            log(f"[{chat}] command spotting: no local model heard anything (ready: "
+                f"{[p for p in wanted if p in STT_PROVIDERS and STT_PROVIDERS[p].ready()]})")
+        return f"[语音] {text}" if text else None
 
     @staticmethod
     def _addressed(ev):

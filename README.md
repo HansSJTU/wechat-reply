@@ -154,9 +154,10 @@ kqueue on message_*.db/-wal -> source.py -> pipeline.py (one thread per chat)
     least `voice_reply_threshold` when the new messages are all voices), then cooldowns; the reply
     model can still back out with `[不回]`. Every verdict goes to `data/group_decisions.jsonl`.
     The LLM's context starts at the 开启.
-  - 关闭: record only — no cloud STT, no LLM, nothing leaves the machine. Voices are heard by a local
-    model (`[reply] command_stt`: whisper-ft, else wu-ft) only to catch a spoken 开启; that transcript is not kept.
-    Voices still reach the labeling page, which drafts them with the local models.
+  - 关闭: record only — no cloud STT, no LLM, nothing leaves the machine. Voices are heard by the local
+    models (whisper-ft and wu-ft) to catch a spoken 开启 (`[reply] command_stt` says whose text counts:
+    whisper-ft, else wu-ft). Their text is kept on this machine in `data/voice_local.jsonl`, where the
+    labeling page takes its drafts from; it never reaches the LLM.
   - Voice chat summaries (`[summary]`, groups that are 开启): once `min_voices` (5) transcribed voices
     have piled up since the last summary (or the last 开启) and nobody has sent a voice for `wait_seconds`
     (10 min; texts in between don't reset it), the bot posts 【聊天总结】 — the topics, who said what, what

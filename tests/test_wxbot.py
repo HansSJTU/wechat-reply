@@ -192,6 +192,41 @@ class TestPipeline(unittest.TestCase):
             finally:
                 st.db.close()
 
+    def test_off_voice_runs_both_local_models_and_keeps_them_locally(self):
+        """关闭: whisper-ft and wu-ft both hear the voice, the record goes to voice_local.jsonl only, and a
+        spoken 开启 counts in the first [reply] command_stt model that heard something."""
+        import json
+
+        from wxbot import understand as und
+        with tempfile.TemporaryDirectory() as d:
+            st = Store(os.path.join(d, "bot.db"))
+            try:
+                pipe = self._make_pipe(st, [])
+                local_p = os.path.join(d, "voice_local.jsonl")
+                calls = []
+                texts = {"whisper-ft": "开启", "wu-ft": "开去"}
+
+                def fake_transcribe(path, name):
+                    calls.append(name)
+                    return SimpleNamespace(text=texts[name], error="", latency=0.1)
+
+                ready = {n: SimpleNamespace(ready=lambda: True) for n in texts}
+                ev = {"chat": "wxid_off", "local_id": 7, "type": "voice", "voice_path": os.path.join(d, "7_x_voice.wav"),
+                      "is_group": False}
+                with patch.object(und, "VOICE_LOCAL", local_p), patch.object(und, "transcribe", fake_transcribe), \
+                     patch("stt.PROVIDERS", ready), patch("wxbot.pipeline.STT_PROVIDERS", ready):
+                    self.assertEqual(pipe._spot("wxid_off", ev), "[语音] 开启")
+                    self.assertEqual(sorted(calls), ["whisper-ft", "wu-ft"])
+                    with open(local_p, encoding="utf-8") as f:
+                        rec = json.loads(f.read())
+                    self.assertEqual((rec["key"], rec["candidates"]), ("7_x_voice.wav", texts))
+
+                    texts["whisper-ft"] = ""  # whisper-ft heard nothing: wu-ft's text is the one checked
+                    texts["wu-ft"] = "开启"
+                    self.assertEqual(pipe._spot("wxid_off", ev), "[语音] 开启")
+            finally:
+                st.db.close()
+
     def test_share_cooldown_checks_auto_kind_not_raw_kind(self):
         with tempfile.TemporaryDirectory() as d:
             st = Store(os.path.join(d, "bot.db"))

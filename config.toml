@@ -24,8 +24,8 @@ stop_file = "data/STOP"     # touch it to pause all replies; delete to resume
 off_words = ["关闭"]         # switch a chat off / on (1:1: the whole message; group: after @<me>), also
                             # spoken: a voice that is just the word, with the bot's name in a group
 on_words = ["开启", "打开"]
-command_stt = ["whisper-ft", "wu-ft"]  # while off, voices are heard by the first ready of these local
-                            # models only, to catch a spoken 开启 (the transcript is not kept)
+command_stt = ["whisper-ft", "wu-ft"]  # while off, the local models hear each voice (kept on this machine in
+                            # data/voice_local.jsonl for labeling); a spoken 开启 counts in the first of these
 
 [llm]                       # placeholder: OpenAI Responses API chat bot (key: openai_api_key in secrets/stt_keys.toml)
 model = "gpt-6.2-sol"        # 11-20 (chat/search/photo test, low effort): 11.7 s vs 23.9 s for gpt-6.1-terra
