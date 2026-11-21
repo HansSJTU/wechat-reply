@@ -26,11 +26,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from labeling import chat_view  # noqa: E402
-from labeling.dataset import (DRAFTERS, LABEL_DIR, LABELS, STATUSES, DRAFT_LOCK, bot_stt, draft, drafts,  # noqa: E402
-                              export, glossary, glossary_prompt, labels, meanings, save_glossary, split_for, vocab,
-                              voices)
+from labeling.dataset import (DRAFTERS, LABEL_DIR, LABELS, LABELS_LOCK, STATUSES, DRAFT_LOCK, bot_stt,  # noqa: E402
+                              draft, drafts, export, glossary, glossary_prompt, labels, meanings, save_glossary,
+                              split_for, vocab, voices)
 from labeling.llm import llm_json  # noqa: E402
 from stt.paths import DATA  # noqa: E402
+from urllib.parse import parse_qs, unquote, urlparse  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -95,9 +96,12 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, json.dumps(obj, ensure_ascii=False).encode(), "application/json; charset=utf-8")
 
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
-            self._send(200, open(os.path.join(HERE, "label_ui.html"), "rb").read(), "text/html; charset=utf-8")
-        elif self.path == "/api/items":
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path in ("/", "/index.html"):
+            with open(os.path.join(HERE, "label_ui.html"), "rb") as f:
+                self._send(200, f.read(), "text/html; charset=utf-8")
+        elif path == "/api/items":
             d, lab, mean, bot = drafts(), labels(), meanings(), bot_stt()
 
             def cloud(key):  # the bot's cloud candidates (local ones are drafted here anyway)
@@ -110,33 +114,34 @@ class Handler(BaseHTTPRequestHandler):
                       "meaning_ref": mean.get(v["key"]) or (bot.get(v["key"]) or {}).get("text") or v.get("prompt", "")}
                      for v in voices()]
             self._json({"items": items, "drafters": DRAFTERS, "drafting": DRAFT_LOCK.locked()})
-        elif self.path in ("/chats", "/chats/"):  # chat viewer (labeling/chat_view.py)
-            self._send(200, open(os.path.join(HERE, "chats_ui.html"), "rb").read(),
-                       "text/html; charset=utf-8")
-        elif self.path == "/api/chats":
+        elif path in ("/chats", "/chats/"):  # chat viewer (labeling/chat_view.py)
+            with open(os.path.join(HERE, "chats_ui.html"), "rb") as f:
+                self._send(200, f.read(), "text/html; charset=utf-8")
+        elif path == "/api/chats":
             self._json({"chats": chat_view.chats()})
-        elif self.path.startswith("/api/chat?"):
-            from urllib.parse import parse_qs, urlparse
-            self._json(chat_view.chat(parse_qs(urlparse(self.path).query).get("c", [""])[0]))
-        elif self.path.startswith("/media/"):  # images saved by the bot (data/media only)
-            name = os.path.basename(self.path.removeprefix("/media/"))
-            path = os.path.join(DATA, "media", name)
-            if not os.path.isfile(path) or not name.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp")):
+        elif path == "/api/chat":
+            self._json(chat_view.chat(parse_qs(parsed.query).get("c", [""])[0]))
+        elif path.startswith("/media/"):  # images saved by the bot (data/media only)
+            name = os.path.basename(unquote(path.removeprefix("/media/")))
+            fpath = os.path.join(DATA, "media", name)
+            if not os.path.isfile(fpath) or not name.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp")):
                 return self._send(404, b"not found", "text/plain")
             ext = name.rsplit(".", 1)[1].lower()
-            self._send(200, open(path, "rb").read(), "image/" + ("jpeg" if ext == "jpg" else ext))
-        elif self.path == "/api/vocab":
+            with open(fpath, "rb") as f:
+                self._send(200, f.read(), "image/" + ("jpeg" if ext == "jpg" else ext))
+        elif path == "/api/vocab":
             self._json({"chars": "".join(sorted(vocab()))})
-        elif self.path == "/api/glossary":
+        elif path == "/api/glossary":
             self._json({"entries": glossary()})
-        elif self.path == "/api/models":
+        elif path == "/api/models":
             self._json({"models": [{"id": k, "name": n} for k, n in CONVERT_MODELS.items()]})
-        elif self.path.startswith("/audio/"):
-            key = self.path.removeprefix("/audio/")
+        elif path.startswith("/audio/"):
+            key = unquote(path.removeprefix("/audio/"))
             v = next((v for v in voices() if v["key"] == key), None)  # only files listed in messages.jsonl
             if not v:
                 return self._send(404, b"not found", "text/plain")
-            data = open(v["wav"], "rb").read()
+            with open(v["wav"], "rb") as f:
+                data = f.read()
             # Range support: without it the browser can't seek (playing from a point on the waveform)
             m = re.fullmatch(r"bytes=(\d*)-(\d*)", self.headers.get("Range", "").strip())
             if m and (m[1] or m[2]):
@@ -153,7 +158,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path not in ("/api/label", "/api/glossary", "/api/convert"):
             return self._send(404, b"not found", "text/plain")
-        r = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            r = json.loads(self.rfile.read(length))
+            if not isinstance(r, dict):
+                raise ValueError("JSON object expected")
+        except (ValueError, json.JSONDecodeError):
+            return self._json({"error": "invalid json"}, 400)
         if self.path == "/api/convert":
             if not str(r.get("rough", "")).strip():
                 return self._json({"error": "empty"}, 400)
@@ -174,9 +185,10 @@ class Handler(BaseHTTPRequestHandler):
         if (isinstance(t, list) and len(t) == 2 and all(isinstance(x, (int, float)) for x in t)
                 and 0 <= t[0] < t[1]):
             rec["trim"] = [round(t[0], 3), round(t[1], 3)]
-        os.makedirs(LABEL_DIR, exist_ok=True)
-        with open(LABELS, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        with LABELS_LOCK:
+            os.makedirs(LABEL_DIR, exist_ok=True)
+            with open(LABELS, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         self._json({"ok": True, "label": rec})
 
 

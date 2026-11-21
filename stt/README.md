@@ -6,7 +6,7 @@ to 16 kHz mono 16-bit WAV with ffmpeg (afconvert fallback), so any input format 
 ```bash
 uv run stt/cli.py --list                     # providers, ✓ = key configured
 uv run stt/cli.py                            # all data/media/*voice.wav × all configured providers
-uv run stt/cli.py a.m4a -p whisper-ft,wu-ft,combo
+uv run --with torch --with openai-whisper stt/cli.py a.m4a -p whisper-ft,wu-ft,combo
 uv run stt/cli.py -e "参考1" -e "参考2" a.wav b.wav   # CER per file + per-provider latency summary
 ```
 

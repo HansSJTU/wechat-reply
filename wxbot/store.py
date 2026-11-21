@@ -45,15 +45,16 @@ class Store:
 
     def add(self, chat, role, text, image_path=None, at=None, **meta):
         with self.lock:
-            self.db.execute("insert into messages (chat, time, role, text, image_path, meta) values (?,?,?,?,?,?)",
-                            (chat, at or time.time(), role, text, image_path,
-                             json.dumps(meta, ensure_ascii=False) if meta else None))
+            cur = self.db.execute("insert into messages (chat, time, role, text, image_path, meta) values (?,?,?,?,?,?)",
+                                  (chat, at or time.time(), role, text, image_path,
+                                   json.dumps(meta, ensure_ascii=False) if meta else None))
+            return cur.lastrowid
 
     def history(self, chat, since):
         with self.lock:
-            rows = self.db.execute("select time, role, text, image_path from messages "
-                                   "where chat = ? and time >= ? order by time, id", (chat, since)).fetchall()
-        return [dict(time=t, role=r, text=x, image_path=i) for t, r, x, i in rows]
+            rows = self.db.execute("select id, time, role, text, image_path from messages "
+                                   "where chat = ? and time >= ? order by id", (chat, since)).fetchall()
+        return [dict(id=rid, time=t, role=r, text=x, image_path=i) for rid, t, r, x, i in rows]
 
     def muted_until(self, chat):
         with self.lock:

@@ -143,11 +143,22 @@ def wxgf_to_jpeg(data: bytes) -> bytes | None:
     return r.stdout if r.returncode == 0 and r.stdout.startswith(b"\xff\xd8") else None
 
 
+class MissingImageKey(ValueError):
+    """A V2 image needs the AES key from secrets/wechat_keys.json; retrying cannot help."""
+
+
 def decrypt_image(data: bytes, aes_key: bytes, xor_key: int):
     parts = parse_v2(data)
     if parts is None:  # legacy single-byte XOR format
         return bytes(b ^ xor_key for b in data)
+    if not aes_key:
+        raise MissingImageKey("missing image aes_key (run tools/derive_image_key.py)")
     aes_part, mid, xor_part = parts
+    if not aes_part or len(aes_part) % 16 != 0:
+        raise ValueError("invalid or truncated V2 image AES block")
     head = aes_ecb_decrypt(aes_key, aes_part)
-    head = head[: -head[-1]]  # PKCS7
+    pad = head[-1]
+    if not (1 <= pad <= 16 and head[-pad:] == bytes([pad]) * pad):
+        raise ValueError(f"invalid PKCS7 padding ({pad}) while decrypting V2 image")
+    head = head[:-pad]
     return head + mid + bytes(b ^ xor_key for b in xor_part)

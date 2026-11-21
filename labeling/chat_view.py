@@ -15,17 +15,11 @@ import re
 import sqlite3
 import time
 
-from labeling.dataset import DRAFTS, LABELS, VOICE_STT
+from labeling.dataset import DRAFTS, LABELS, VOICE_STT, _jsonl
 from stt.paths import DATA
 from wxbot.config import load_config, switch_words
 
 MENTION = re.compile(r"@[^\s ]+[\s ]*")
-
-
-def _jsonl(path):
-    if not os.path.exists(path):
-        return []
-    return [json.loads(l) for l in open(path, encoding="utf-8") if l.strip()]
 
 
 def _db():
@@ -64,7 +58,6 @@ def _switch_row(con, chat):
 def chats() -> list[dict]:
     cfg = load_config()
     msgs = _jsonl(os.path.join(DATA, "messages.jsonl"))
-    con = _db()
     by_chat = {}
     for m in msgs:
         c = by_chat.setdefault(m["chat"], {"chat": m["chat"], "name": m.get("chat_name") or m["chat"],
@@ -72,12 +65,17 @@ def chats() -> list[dict]:
         c["count"] += 1
         c["last"] = m
     out = []
-    for c in by_chat.values():
-        row = con and _switch_row(con, c["chat"])
-        on = bool(row[0]) if row else _default_on(cfg, c["chat"], c["name"])
-        last = c.pop("last")
-        out.append({**c, "on": on, "switched_at": row[1] if row else None, "last_time": last["time"],
-                    "last_preview": _preview(last)})
+    con = _db()
+    try:
+        for c in by_chat.values():
+            row = con and _switch_row(con, c["chat"])
+            on = bool(row[0]) if row else _default_on(cfg, c["chat"], c["name"])
+            last = c.pop("last")
+            out.append({**c, "on": on, "switched_at": row[1] if row else None, "last_time": last["time"],
+                        "last_preview": _preview(last)})
+    finally:
+        if con is not None:
+            con.close()
     return sorted(out, key=lambda c: -c["last_time"])
 
 
@@ -131,19 +129,29 @@ def chat(chat_id: str) -> dict:
     on_words, off_words = switch_words(cfg)
     msgs = [m for m in _jsonl(os.path.join(DATA, "messages.jsonl")) if m["chat"] == chat_id]
     stt = {r["key"]: r for r in _jsonl(VOICE_STT) if r.get("chat") == chat_id}
-    drafts = json.load(open(DRAFTS, encoding="utf-8")) if os.path.exists(DRAFTS) else {}
+    if os.path.exists(DRAFTS):
+        with open(DRAFTS, encoding="utf-8") as f:
+            drafts = json.load(f)
+    else:
+        drafts = {}
     labels = {}
     for r in _jsonl(LABELS):
         labels[r["key"]] = r
     # what the reply LLM saw for each message (bot.db, by local_id): the transcription of voices from before
     # voice_stt.jsonl existed
-    seen = {}
+    seen, bot_msgs, switch_row = {}, [], None
     con = _db()
     if con:
-        for text, meta in con.execute("select text, meta from messages where chat = ? and role = 'user'", (chat_id,)):
-            m = json.loads(meta or "{}")
-            if m.get("local_id") is not None:
-                seen[m["local_id"]] = text
+        try:
+            for text, meta in con.execute("select text, meta from messages where chat = ? and role = 'user'", (chat_id,)):
+                m = json.loads(meta or "{}")
+                if m.get("local_id") is not None:
+                    seen[m["local_id"]] = text
+            bot_msgs = con.execute("select time, role, text from messages where chat = ? and role = 'assistant'",
+                                   (chat_id,)).fetchall()
+            switch_row = _switch_row(con, chat_id)
+        finally:
+            con.close()
     decisions = _decisions(chat_id, msgs)
     name = msgs[0].get("chat_name") if msgs else chat_id
     is_group = chat_id.endswith("@chatroom")
@@ -170,14 +178,11 @@ def chat(chat_id: str) -> dict:
         if cmd:
             switches.append({"kind": "switch", "time": m["time"], "on": cmd == "on",
                              "by": m.get("sender_name") or m.get("sender")})
-    if con:
-        for t, role, text in con.execute("select time, role, text from messages where chat = ? and role = 'assistant'",
-                                         (chat_id,)):
-            items.append({"kind": "msg", "time": t, "type": "text", "sender": "莫名其妙（机器人）", "bot": True,
-                          "text": text})
-        row = _switch_row(con, chat_id)
-        if row and not any(abs(s["time"] - row[1]) < 5 for s in switches):  # set outside a chat command
-            switches.append({"kind": "switch", "time": row[1], "on": bool(row[0]), "by": "（直接设置）"})
+    for t, role, text in bot_msgs:
+        items.append({"kind": "msg", "time": t, "type": "text", "sender": "莫名其妙（机器人）", "bot": True,
+                      "text": text})
+    if switch_row and not any(abs(s["time"] - switch_row[1]) < 5 for s in switches):  # set outside a chat command
+        switches.append({"kind": "switch", "time": switch_row[1], "on": bool(switch_row[0]), "by": "（直接设置）"})
     switches.sort(key=lambda s: s["time"])
     # state periods for the strip: from the first message, default state, then each switch
     start = min([i["time"] for i in items] + [s["time"] for s in switches], default=0)
@@ -187,8 +192,7 @@ def chat(chat_id: str) -> dict:
         if s["on"] != state:
             periods.append({"from": t0, "to": s["time"], "on": state})
             t0, state = s["time"], s["on"]
-    row = con and _switch_row(con, chat_id)
-    current = bool(row[0]) if row else state
+    current = bool(switch_row[0]) if switch_row else state
     periods.append({"from": t0, "to": None, "on": state})
     g = cfg.get("group") or {}
     timeline = sorted(items + switches, key=lambda x: (x["time"], x["kind"] != "switch"))

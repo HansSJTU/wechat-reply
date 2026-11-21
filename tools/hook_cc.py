@@ -12,12 +12,14 @@ usage (arm64):
        -o "hookrun <seconds> <out.tsv>" -o quit
 """
 import os
+import threading
 import time
 
 import lldb
 
 OUT = None
 SEEN = set()
+_LOCK = threading.Lock()
 
 
 def _read(frame, addr, n):
@@ -31,11 +33,12 @@ def _reg(frame, name):
 
 
 def _log(line):
-    if line in SEEN:
-        return
-    SEEN.add(line)
-    with open(OUT, "a") as f:
-        f.write(line + "\n")
+    with _LOCK:
+        if line in SEEN:
+            return
+        SEEN.add(line)
+        with open(OUT, "a") as f:
+            f.write(line + "\n")
 
 
 def on_create(frame, bp_loc, internal_dict):
@@ -114,10 +117,12 @@ def _capture(debugger, target, process, secs):
     last_n = 0
     while time.time() - t0 < secs:
         time.sleep(5)
-        if len(SEEN) != last_n:
-            last_n, last_change = len(SEEN), time.time()
-        print(f"  {int(time.time() - t0)}s  distinct captures: {len(SEEN)}", flush=True)
-        have_raw = any(s.startswith("pbkdf\t") and int(s.rsplit("\t", 1)[1]) > 1000 for s in SEEN)
+        with _LOCK:
+            n_seen = len(SEEN)
+            have_raw = any(s.startswith("pbkdf\t") and int(s.rsplit("\t", 1)[1]) > 1000 for s in SEEN)
+        if n_seen != last_n:
+            last_n, last_change = n_seen, time.time()
+        print(f"  {int(time.time() - t0)}s  distinct captures: {n_seen}", flush=True)
         if have_raw and time.time() - last_change > 10:
             print("raw key captured and quiet for 10s; stopping early", flush=True)
             break
@@ -125,7 +130,9 @@ def _capture(debugger, target, process, secs):
     time.sleep(1)
     target.DeleteAllBreakpoints()
     process.Detach()
-    print(f"detached; wrote {len(SEEN)} captures to {OUT}", flush=True)
+    with _LOCK:
+        total = len(SEEN)
+    print(f"detached; wrote {total} captures to {OUT}", flush=True)
 
 
 def __lldb_init_module(debugger, internal_dict):

@@ -285,15 +285,15 @@ function select(key) {
 // ---- 我听到的 → Gemini / GPT → 余姚话 + 普通话 (kept per clip while the page is open)
 const rough = {};      // key -> {text, busy, res, err}
 let withAudio = false;
-let models = [{id: "gemini-4-hydrogen", name: "Gemini hydrogen"}];
-let model = (() => { try { return localStorage.getItem("convertModel"); } catch { return null; } })() || models[0].id;
-const isGemini = m => m.startsWith("gemini");
+let models = [];
+let model = (() => { try { return localStorage.getItem("convertModel"); } catch { return null; } })() || "";
+const isGemini = m => (m || "").startsWith("gemini");
 function syncAudioOpt() {  // only Gemini can listen to the clip
   const cb = $("#withAudio"), lab = $("#audioOpt"); if (!cb) return;
   cb.disabled = !isGemini(model); lab.style.opacity = cb.disabled ? .4 : 1;
 }
 fetch("/api/models").then(r => r.json()).then(r => {
-  models = r.models; if (!models.some(m => m.id === model)) model = models[0].id;
+  models = r.models; if (!models.some(m => m.id === model)) model = models[0]?.id || "";
   const s = $("#model"); if (s) { s.innerHTML = models.map(m => `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join(""); s.value = model; syncAudioOpt(); }
 }).catch(() => {});
 
@@ -305,7 +305,7 @@ async function convert() {
   renderConv();
   try {
     const r = await fetch("/api/convert", {method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({key, rough: text, audio, model})}).then(r => r.json());
+      body: JSON.stringify({key, rough: text, audio, model: model || undefined})}).then(r => r.json());
     if (r.ok) st.res = r; else st.err = r.error || "转换失败";
   } catch (e) { st.err = String(e); }
   st.busy = false;
@@ -318,8 +318,8 @@ function renderConv() {
   $("#convert").disabled = !!st?.busy;
   if (!st) { el.style.display = "none"; return; }
   el.style.display = "block";
-  if (st.busy) { const name = models.find(m => m.id === st.model)?.name ?? st.model;
-    el.innerHTML = `<div class="notes">${esc(name)} 转换中…（${st.audio ? "带录音，约一分钟" : st.model.startsWith("agy:") ? "约 40 秒" : isGemini(st.model) ? "约 15 秒" : "约 5 秒"}）</div>`; return; }
+  if (st.busy) { const name = models.find(m => m.id === st.model)?.name ?? (st.model || "默认模型");
+    el.innerHTML = `<div class="notes">${esc(name)} 转换中…（${st.audio ? "带录音，约一分钟" : (st.model || "").startsWith("agy:") ? "约 40 秒" : isGemini(st.model) ? "约 15 秒" : "约 5 秒"}）</div>`; return; }
   if (st.err) { el.innerHTML = `<div class="err">${esc(st.err)}</div>`; return; }
   const r = st.res;
   el.innerHTML = `
@@ -337,7 +337,7 @@ function renderConv() {
 
 function useDraft(d) {
   const it = items.find(i => i.key === sel);
-  if (it && it.drafts[d] != null) { $("#wu").value = it.drafts[d]; checkOov(); $("#wu").focus(); }
+  if (it && it.drafts[d] != null) { $("#wu").value = it.drafts[d]; checkOov(); checkGloss(); $("#wu").focus(); }
 }
 
 function checkOov() {

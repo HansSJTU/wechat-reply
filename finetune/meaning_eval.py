@@ -168,7 +168,7 @@ def judge(names: list[str], llm: str = "deepseek", runs: int = 1):
         return json.dumps([hyps[p].get(key, "") for p in name.split("+")], ensure_ascii=False) + (f"#{r}" if r else "")
 
     def do_refine(j):
-        cands = [c for c in json.loads(j.split("#")[0]) if c] or ["（无识别结果）"]
+        cands = [c for c in json.loads(re.sub(r"#\d+$", "", j)) if c] or ["（无识别结果）"]
         try:
             return j, refine.refine(cands) if llm == "deepseek" else refine_openai(llm, cands)
         except Exception as e:
@@ -186,7 +186,6 @@ def judge(names: list[str], llm: str = "deepseek", runs: int = 1):
             verdicts[json.dumps(p, ensure_ascii=False)] = v
     _save("verdicts.json", verdicts)
 
-    import u2pp
     rows, detail = [], []
     for n in names:
         cells = []

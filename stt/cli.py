@@ -2,12 +2,14 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = ["httpx", "websockets>=13", "sherpa-onnx"]
+# # whisper-wu / whisper-ft / combo also need: uv run --with torch --with openai-whisper stt/cli.py …
+# # (without them those providers report "model files or local dependencies not installed")
 # ///
 """Compare speech-to-text providers on the same clips.
 
   uv run stt/cli.py                       every data/media/*voice.wav, every provider with a key
   uv run stt/cli.py a.m4a b.wav           specific files (any format ffmpeg reads)
-  uv run stt/cli.py -p whisper-ft,wu-ft a.wav
+  uv run --with torch --with openai-whisper stt/cli.py -p whisper-ft,wu-ft a.wav
   uv run stt/cli.py --list                providers and whether their key is set
   uv run stt/cli.py -e "期望1" -e "期望2" a.wav b.wav
                                           reference transcripts, paired with files in order (CER)

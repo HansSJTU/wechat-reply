@@ -15,10 +15,11 @@ class Provider:
     label: str
     run: Callable[[Audio], "str | tuple[str, dict]"]  # text, or (text, extra details)
     ready: Callable[[], bool]
+    not_ready: str = "no API key configured"
 
 
-def _p(name, label, run, ready):
-    return name, Provider(name, label, run, ready)
+def _p(name, label, run, ready, not_ready="no API key configured"):
+    return name, Provider(name, label, run, ready, not_ready)
 
 
 def _cloud(module: str, fn: str = "transcribe", *args, ready: str = "ready", **kw):
@@ -31,17 +32,19 @@ def _cloud(module: str, fn: str = "transcribe", *args, ready: str = "ready", **k
 # newest available 2026-11-14 (cloud.gemini.models()); gemini-omni-* rejects audio input on this key
 GEMINI_FLASH, GEMINI_PRO, GEMINI_4 = "gemini-3.8-flash", "gemini-3.1-pro-preview", "gemini-4-carbon"
 
+_LOCAL_NOT_READY = "model files or local dependencies not installed"
+
 PROVIDERS: dict[str, Provider] = dict([
     # Local, offline (audio never leaves the machine): WenetSpeech-Wu U2++ Conformer (sherpa-onnx) and
     # Whisper-Medium-Wu, each as released and fine-tuned on the labeled clips (finetune/).
-    _p("wu-local", "本地 WenetSpeech-Wu U2++ int8 (吴语, CPU)", local_wu.transcribe, local_wu.ready),
+    _p("wu-local", "本地 WenetSpeech-Wu U2++ int8 (吴语, CPU)", local_wu.transcribe, local_wu.ready, _LOCAL_NOT_READY),
     _p("wu-ft", "本地 U2++ 微调版 int8 (用标注的微信语音微调, CPU)",
-       lambda a: local_wu.transcribe(a, local_wu.FT_DIR), lambda: local_wu.ready(local_wu.FT_DIR)),
+       lambda a: local_wu.transcribe(a, local_wu.FT_DIR), lambda: local_wu.ready(local_wu.FT_DIR), _LOCAL_NOT_READY),
     _p("whisper-wu", "本地 Whisper-Medium-Wu (WenetSpeech-Wu 微调, MPS)", local_whisper_wu.transcribe,
-       local_whisper_wu.ready),
+       local_whisper_wu.ready, _LOCAL_NOT_READY),
     _p("whisper-ft", "本地 Whisper-Medium-Wu 微调版 (用标注的语音微调, MPS)",
        lambda a: local_whisper_wu.transcribe(a, ckpt=local_whisper_wu.FT_CKPT),
-       lambda: local_whisper_wu.ready(local_whisper_wu.FT_CKPT)),
+       lambda: local_whisper_wu.ready(local_whisper_wu.FT_CKPT), _LOCAL_NOT_READY),
     # ---- cloud (stt/cloud/), for comparison only
     # OpenAI — gpt-transcribe is current; the 4o/whisper models shut down 2027-02-26.
     _p("openai", "OpenAI gpt-transcribe", *_cloud("openai", "transcribe", "gpt-transcribe")),
@@ -114,7 +117,8 @@ def _combo(audio: Audio) -> tuple[str, dict]:
 
 PROVIDERS["combo"] = Provider(
     "combo", "local whisper-ft (+ wu-ft recorded) → deepseek-flash 余姚话→普通话", _combo,
-    lambda: refine.ready() and any(PROVIDERS[n].ready() for n in COMBO_ASR))
+    lambda: refine.ready() and any(PROVIDERS[n].ready() for n in COMBO_ASR),
+    "missing DeepSeek API key or ready local ASR model")
 
 
 @dataclass
@@ -140,7 +144,7 @@ def transcribe(audio: "Audio | str", provider: str = "combo") -> Result:
     p = PROVIDERS[provider]
     res = Result(provider, audio.name, audio_seconds=round(audio.seconds, 2))
     if not p.ready():
-        res.error = "no API key configured"
+        res.error = p.not_ready
         return res
     t = time.monotonic()
     try:

@@ -23,7 +23,7 @@ from .livedb import LiveDB
 from .log import log
 from .paths import DATA, ROOT
 from .sender import Refused
-from .wxcrypto import decrypt_image, image_kind, key_for_db, wxgf_to_jpeg
+from .wxcrypto import MissingImageKey, decrypt_image, image_kind, key_for_db, wxgf_to_jpeg
 
 DOCS = os.path.expanduser("~/Library/Containers/com.tencent.xinWeChat/Data/Documents")
 TYPES = {1: "text", 3: "image", 34: "voice", 42: "card", 43: "video", 47: "emoji", 48: "location",
@@ -263,7 +263,10 @@ class Source:
         elif base == 49:
             ev.update(self.appmsg(text, sub))
             if ev["is_group"] and ev.get("quote"):  # a quoted reply: to the bot's message, or with an @
-                ev["quotes_me"] = ev["quote"].get("sender") in self.my_names()
+                q = ev["quote"]
+                qid = q.get("sender_id")
+                ev["quotes_me"] = (qid == self.me) if (qid and not qid.endswith("@chatroom")) else (
+                    q.get("sender") in self.my_names())
                 ev["mentions_me"], ev["at_others"] = self.mentions(ev.get("text") or "", text_of(src, src_flag))
         elif base == 47:
             m = re.search(r'cdnurl\s*=\s*"([^"]+)"', text)
@@ -304,8 +307,8 @@ class Source:
         img, origin = None, None
         thumb = f"{d}/{md5}_t.dat"
         if full:
-            with open(full[0], "rb") as f:
-                img, origin = decrypt_image(f.read(), self.img_key, self.img_xor), "local"
+            img = self._decrypt_file(full[0])
+            origin = img and "local"
         elif self.should_fetch(chat, ctime, is_self=is_self):
             # The message row lands before the client has downloaded the thumbnail, and a request for
             # the same image while that runs is refused (-20003): let the thumbnail arrive first.
@@ -314,13 +317,14 @@ class Source:
             origin = img and "cdn"
             full = [] if img else [p for p in (f"{d}/{md5}_h.dat", f"{d}/{md5}.dat") if os.path.exists(p)]
             if full:  # meanwhile the client fetched it itself (chat open)
-                with open(full[0], "rb") as f:
-                    img, origin = decrypt_image(f.read(), self.img_key, self.img_xor), "local"
+                img = self._decrypt_file(full[0])
+                origin = img and "local"
         if img is None:
             if not wait_for(thumb, 3):
                 return {"image_error": "file not downloaded yet", "image_id": md5}
-            with open(thumb, "rb") as f:
-                img, origin = decrypt_image(f.read(), self.img_key, self.img_xor), "thumbnail"
+            img, origin = self._decrypt_file(thumb), "thumbnail"  # may still be being written
+            if img is None:
+                return {"image_error": "image could not be decrypted", "image_id": md5}
         if image_kind(img) == "wxgf":  # WeChat's own HEVC container: the LLM needs JPEG
             img = wxgf_to_jpeg(img) or img
         kind = image_kind(img) or "bin"
@@ -329,6 +333,25 @@ class Source:
             f.write(img)
         return {"image_path": out, "image_is_thumbnail": origin == "thumbnail", "image_origin": origin,
                 "image_format": kind}
+
+    def _decrypt_file(self, path, tries=3):
+        """Decrypted image bytes, or None (logged) for a missing key or a file WeChat is still writing:
+        a bad image must not cost the whole message."""
+        for attempt in range(tries):
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+                if not data:
+                    raise ValueError("empty image file")
+                return decrypt_image(data, self.img_key, self.img_xor)
+            except (OSError, ValueError) as e:
+                err = e
+                if isinstance(e, MissingImageKey):  # permanent: don't stall the source worker retrying
+                    break
+                if attempt + 1 < tries:
+                    time.sleep(0.3)
+        log(f"image {os.path.basename(path)}: {err}")
+        return None
 
     def should_fetch(self, chat, ctime, is_self=False):
         """Fetch full size only for chats currently 开启, and not for own messages or old backlog."""
@@ -449,8 +472,11 @@ class Source:
                            url=node.findtext("url"), app_type=int(node.findtext("type") or sub))
                 ref = node.find("refermsg")
                 if ref is not None:  # quoted reply
-                    res["quote"] = dict(sender=ref.findtext("displayname"),
-                                        text=self.quoted(ref.findtext("type"), ref.findtext("content")))
+                    q = dict(sender=ref.findtext("displayname"),
+                             text=self.quoted(ref.findtext("type"), ref.findtext("content")))
+                    if (chatusr := (ref.findtext("chatusr") or "").strip()):
+                        q["sender_id"] = chatusr
+                    res["quote"] = q
                     res["text"] = res.pop("title")
         except ET.ParseError:
             res["xml"] = xml

@@ -46,6 +46,7 @@ AUTO_HINT = {"bot": "有人没 @ 你但在跟你说话，回应他。",
                       "拿不准的先联网查准；别附和、别说教。",
              "other": ""}
 DECISIONS = os.path.join(DATA, "group_decisions.jsonl")  # every unprompted-turn verdict, for tuning
+_DECISIONS_LOCK = threading.Lock()
 
 
 class Pipeline:
@@ -146,7 +147,7 @@ class Pipeline:
                     self.summarized[chat] = time.time()
                 continue
             self._ingest(chat, batch[0])
-            while True:  # a burst of messages gets one reply
+            while not self._parse_command(batch[-1]):  # a burst gets one reply; commands take effect right away
                 try:
                     ev = q.get(timeout=self._group_wait(chat, batch) or debounce)
                 except queue.Empty:
@@ -160,9 +161,9 @@ class Pipeline:
                 log(f"[{chat}] reply failed: {type(e).__name__}: {e}")
 
     def _ingest(self, chat, ev):
+        on = self._on(chat, ev)
         try:
             # 关闭: the voice stays on this machine (placeholder, no STT)
-            on = self._on(chat, ev)
             stt = self.cfg.get("stt", {}).get("provider", "combo") if on else None
             seen = understand(ev, stt)
             if not on and ev["type"] == "voice" and ev.get("voice_path"):
@@ -179,7 +180,12 @@ class Pipeline:
             ev["mentions_me"] = True  # nobody can @ in a voice: saying the bot's name counts as one
         if ev.get("is_group"):  # who said it, for the LLM
             text = f"{ev.get('sender_name') or ev.get('sender')}：{text}"
-        self.store.add(chat, "user", text, image, at=ev["time"], local_id=ev["local_id"], type=ev["type"])
+        at = ev["time"]
+        if on:
+            floor = self.store.history_floor(chat)
+            if floor - 1.0 < at < floor:  # arrived right after 开启 within the same WeChat integer second
+                at = floor
+        ev["_row_id"] = self.store.add(chat, "user", text, image, at=at, local_id=ev["local_id"], type=ev["type"])
         log(f"[{chat}] <- {text[:80]!r}" + (" +image" if image else ""))
 
     def _respond(self, chat, batch):
@@ -279,7 +285,7 @@ class Pipeline:
                                + h["text"] for h in rows)
         # the next summary starts after the newest line covered here (not at send time: voices that land while
         # the LLM writes belong to the next one); set even if the LLM or the send fails, so no retry storm
-        upto = rows[-1]["time"] + 0.001  # history() is inclusive
+        upto = max(h["time"] for h in rows) + 0.001  # history() is inclusive
         self.summarized[chat] = upto
         t = time.monotonic()
         try:
@@ -317,7 +323,8 @@ class Pipeline:
             return None
         t = time.monotonic()
         try:
-            images = [h["image_path"] for h in history if h["time"] >= live[0]["time"] and h.get("image_path")]
+            live_ids = {ev.get("_row_id") for ev in live if ev.get("_row_id") is not None}
+            images = [h["image_path"] for h in history if h.get("id") in live_ids and h.get("image_path")]
             voice = all(ev.get("type") == "voice" for ev in live if self._eligible(ev))
             d = llm.judge(self.cfg["llm"], g, self._transcript(history, live), images, self._members(chat), voice)
         except Exception as e:
@@ -346,23 +353,58 @@ class Pipeline:
     def _transcript(self, history, live):
         """Plain text for the judge: the last `judge_context` lines, earlier ones and the new burst apart."""
         me = (self.g.get("names") or ["机器人"])[0]
-        start = live[0]["time"]
+        live_ids = {ev.get("_row_id") for ev in live if ev.get("_row_id") is not None}
         rows = history[-int(self.g.get("judge_context", 30)):]
         def line(h):
             who = f"{me}（就是你）：" if h["role"] == "assistant" else ""
             return f"[{time.strftime('%H:%M', time.localtime(h['time']))}] {who}{h['text']}"
-        old = [line(h) for h in rows if h["time"] < start]
-        new = [line(h) for h in rows if h["time"] >= start]
+        old = [line(h) for h in rows if h.get("id") not in live_ids]
+        new = [line(h) for h in rows if h.get("id") in live_ids]
         return ("之前的群聊：\n" + ("\n".join(old) or "（无）") + "\n\n新消息：\n" + "\n".join(new))
 
     def _record(self, chat, live, verdict, skipped):
         rec = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "chat": chat, "ids": [ev.get("local_id") for ev in live],
                "new": [ev.get("_text") for ev in live], "verdict": verdict, "skipped": skipped}
         try:
-            with open(DECISIONS, "a", encoding="utf-8") as f:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            with _DECISIONS_LOCK:
+                with open(DECISIONS, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         except OSError as e:
             log(f"[{chat}] could not record decision: {e}")
+
+    def _parse_command(self, ev):
+        """Return 'on' / 'off' / 'summary' if `ev` is a control command, else None."""
+        if ev.get("_skip"):
+            return None
+        on_words, off_words = switch_words(self.cfg)
+        names = self.g.get("names") or []
+        summary_words = self.s.get("words", ["总结", "总结一下"])
+        if ev.get("type") == "text":
+            text = ev.get("text") or ""
+            if ev.get("is_group"):
+                if not ev.get("mentions_me"):
+                    return None
+                text = MENTION.sub("", text)
+            word = text.strip(" 。.!！~～")
+        elif ev.get("type") == "voice":  # "莫名其妙 关闭" said out loud; in a 1:1 chat the word alone
+            text = ev.get("_heard") or ev.get("_text") or ""
+            if not text.startswith("[语音] "):
+                return None
+            text = text[len("[语音] "):]
+            if ev.get("is_group") and not any(n in text for n in names):
+                return None
+            for n in names:
+                text = text.replace(n, " ")
+            word = text.strip(FILLER)
+        else:
+            return None
+        if word in off_words:
+            return "off"
+        if word in on_words:
+            return "on"
+        if word in summary_words and ev.get("is_group"):  # 1:1 chats just ask the LLM
+            return "summary"
+        return None
 
     def _command(self, chat, live, fresh):
         """开启 / 关闭: a whole text message in a 1:1 chat, "@<me> 开启" in a group, or the same said in a voice
@@ -370,35 +412,11 @@ class Pipeline:
         restart); the confirmation is a fixed text, not the LLM. Returns True when the batch's last
         command was handled."""
         cmd = None
-        on_words, off_words = switch_words(self.cfg)
         names = self.g.get("names") or []
-        summary_words = self.s.get("words", ["总结", "总结一下"])
         for ev in live:
-            if ev.get("type") == "text":
-                text = ev.get("text") or ""
-                if ev.get("is_group"):
-                    if not ev.get("mentions_me"):
-                        continue
-                    text = MENTION.sub("", text)
-                word = text.strip(" 。.!！~～")
-            elif ev.get("type") == "voice":  # "莫名其妙 关闭" said out loud; in a 1:1 chat the word alone
-                text = ev.get("_heard") or ev.get("_text") or ""
-                if not text.startswith("[语音] "):
-                    continue
-                text = text[len("[语音] "):]
-                if ev.get("is_group") and not any(n in text for n in names):
-                    continue
-                for n in names:
-                    text = text.replace(n, " ")
-                word = text.strip(FILLER)
-            else:
-                continue
-            if word in off_words:
-                cmd = ("off", ev)
-            elif word in on_words:
-                cmd = ("on", ev)
-            elif word in summary_words and ev.get("is_group"):  # 1:1 chats just ask the LLM
-                cmd = ("summary", ev)
+            kind = self._parse_command(ev)
+            if kind:
+                cmd = (kind, ev)
         if not cmd:
             return False
         kind, ev = cmd
@@ -428,11 +446,11 @@ class Pipeline:
             ack = (f"好的，已关闭：不再回复，语音只在本机听有没有「开启」。想打开就 @我 说「开启」，或者发语音说「{name} 开启」。"
                    if group else "好的，已关闭：不再回复，语音只在本机听有没有「开启」。发「开启」（文字或语音）再打开。")
         if fresh and not os.path.exists(os.path.join(ROOT, self.r.get("stop_file", "data/STOP"))):
-            self._deliver(chat, ack)
+            self._deliver(chat, ack, at=max(time.time(), ev["time"] + 0.6) if on else None)
         return True
 
     # ---- sending -----------------------------------------------------------
-    def _deliver(self, chat, text, auto=None, **meta):
+    def _deliver(self, chat, text, auto=None, at=None, **meta):
         if self.dry_run:
             log(f"[{chat}] (dry run) would send {text!r}")
             return
@@ -440,7 +458,7 @@ class Pipeline:
             r = self.sender.send_text(chat, text)
         except NotReady as e:
             with self.lock:
-                self.pending[chat] = (time.time(), text, {"auto": auto, **meta})
+                self.pending[chat] = (time.time(), text, {"auto": auto, "at": at, **meta})
             log(f"[{chat}] held: {e}")
             self._notice("微信机器人有待发的回复：请在调试版微信里手动发一条文字")
             return
@@ -448,7 +466,8 @@ class Pipeline:
             log(f"[{chat}] send failed, not retried: {type(e).__name__}: {e}")
             return
         meta = {**({"auto": auto} if auto else {}), **{k: v for k, v in meta.items() if v is not None}}
-        self.store.add(chat, "assistant", text, client_msg_id=r["clientMessageId"], task_id=r.get("taskId"), **meta)
+        self.store.add(chat, "assistant", text, at=at, client_msg_id=r["clientMessageId"],
+                       task_id=r.get("taskId"), **meta)
         log(f"[{chat}] -> sent (task {r.get('taskId')}, result {r.get('result')})")
 
     def _flush_pending(self):

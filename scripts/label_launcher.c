@@ -7,6 +7,7 @@
 // re-signs) the other, which would drop that app's privacy grants.
 //
 // build: scripts/install.sh label
+#include <errno.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
@@ -41,7 +42,8 @@ int main(void) {
     signal(SIGINT, forward);
     signal(SIGHUP, forward);
     int status = 0;
-    while (waitpid(child, &status, 0) < 0) {
+    pid_t w;
+    while ((w = waitpid(child, &status, 0)) < 0 && errno == EINTR) {
     }
-    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+    return (w > 0 && WIFEXITED(status)) ? WEXITSTATUS(status) : 1;
 }

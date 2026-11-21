@@ -42,9 +42,11 @@ def system_prompt() -> str:
     if _system[0] != stamp:
         parts = [SYSTEM]
         if os.path.exists(NOTES):
-            parts.append(open(NOTES, encoding="utf-8").read())
+            with open(NOTES, encoding="utf-8") as f:
+                parts.append(f.read())
         if os.path.exists(GLOSSARY):
-            gl = json.load(open(GLOSSARY, encoding="utf-8"))
+            with open(GLOSSARY, encoding="utf-8") as f:
+                gl = json.load(f)
             parts.append("## 说法表（余姚话写法 = 普通话意思）\n" + "\n".join(f"{e['wu']} = {e['mandarin']}" for e in gl))
         _system = (stamp, "\n\n".join(parts) + END)
     return _system[1]
@@ -57,7 +59,25 @@ def ready() -> bool:
 # On garbled long clips the LLM occasionally answers about the task instead of with a sentence
 # ("这些识别结果都不太靠谱…请提供更准确的识别结果"). A prompt rule against it did not help (2026-11-15),
 # so such replies are detected here, retried once, then reported as an error (combo falls back).
-META = re.compile(r"识别结果|识别系统|请提供|不太靠谱|无法(可靠|确定|推断|还原|判断)|整理成普通话|抱歉")
+META = re.compile(r"识别结果|识别系统|请提供|整理成普通话|无法(?:可靠|推断|还原|辨认)")
+# Refusal phrasing is also ordinary speech ("我无法理解他", "抱歉我不能来"): it only counts as commentary
+# when the answer also talks about the task itself.
+REFUSAL = re.compile(r"无法(?:确定|判断|理解)"
+                     r"|抱歉[，,：:\s]*我?(?:无法|不能|难以|实在无法|听不清|识别不出|没有办法)")
+TASK = re.compile(r"识别|转写|录音|语音|说话人|这段|这些|这句话|原文|原意")
+CONTENT = re.compile(r"[\u3400-\u9fffA-Za-z0-9]")
+
+
+def _valid_output(text: str, candidates: list[str]) -> bool:
+    if META.search(text) or (REFUSAL.search(text) and TASK.search(text)):
+        return False
+    n_out = len(CONTENT.findall(text))
+    if n_out == 0:
+        return False
+    # reject a 1-char answer (seen once with the long prompt: just "的") only when every candidate is long;
+    # the shortest one counts, since Whisper pads short clips with invented text
+    n_in = min((n for n in (len(CONTENT.findall(c)) for c in candidates) if n), default=0)
+    return not (n_out < 2 and n_in >= 4)
 
 
 def _ask(user: str) -> str:
@@ -77,7 +97,6 @@ def refine(candidates: list[str]) -> str:
     user = "\n".join(f"识别结果{i + 1}：{c}" for i, c in enumerate(candidates))
     for _ in range(2):
         text = _ask(user)
-        # also reject near-empty answers (seen once with the long prompt: just "的")
-        if not META.search(text) and len(re.findall(r"[\u3400-\u9fff]", text)) >= 2:
+        if _valid_output(text, candidates):
             return text
     raise RuntimeError(f"LLM answered with commentary instead of a sentence: {text[:80]}")

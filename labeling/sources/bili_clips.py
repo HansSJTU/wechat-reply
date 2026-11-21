@@ -30,7 +30,6 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from labeling.dataset import EXTRA, drafts as asr_drafts, glossary, glossary_prompt, split_of  # noqa: E402
-from labeling.llm import llm_json  # noqa: E402
 from labeling.sources.wavio import RATE, read_pcm, speech_span, to_wav, write_wav  # noqa: E402
 from stt.local_wu import FT_DIR  # noqa: E402
 from stt.paths import DATA  # noqa: E402
@@ -308,6 +307,7 @@ def propose(it: dict, glossary: str, drafts: dict, model: str = MODEL) -> dict:
     """GPT is text only: clips without on-screen dialect text use the local ASR drafts (whisper-wu / wu-local /
     wu-ft, filled in by the labeling server) as the evidence of what was said. A Gemini model also gets the clip
     (except 语保 items, whose dialect characters and IPA are on screen)."""
+    from labeling.llm import llm_json  # lazy: keeps group_subtitles() importable without httpx
     d = drafts.get(it["key"], {})
     heard = "；".join(f"{n}：{t}" for n, t in d.items() if t) or "（无）"
     place = "慈溪" if "慈溪" in it["sender"] else "余姚"

@@ -40,7 +40,26 @@ DRAFTERS = ["whisper-wu", "wu-local", "wu-ft", "whisper-ft"]
 STATUSES = ("done", "skip", "bad", "exclude")
 PUNCT = re.compile(r"[\s　-〿＀-／：-＠［-｀｛-･.,!?;:'\"()\[\]…—-]+")
 
-DRAFT_LOCK = threading.Lock()  # held while draft() runs (the page shows "drafting")
+DRAFT_LOCK = threading.Lock()     # held while draft() runs (the page shows "drafting")
+GLOSSARY_LOCK = threading.Lock()  # serializes glossary.json.tmp writes across HTTP threads
+LABELS_LOCK = threading.Lock()    # serializes appends to labels.jsonl across HTTP threads
+
+
+def _jsonl(path: str) -> list[dict]:
+    """Read a JSONL file, skipping blank or half-written lines (e.g. while monitor.py appends)."""
+    if not os.path.exists(path):
+        return []
+    out = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return out
 
 
 def split_of(key: str) -> str:
@@ -50,20 +69,18 @@ def split_of(key: str) -> str:
 def voices() -> list[dict]:
     """Every saved voice message whose audio file exists, oldest first."""
     out, seen = [], set()
-    if os.path.exists(MESSAGES):
-        for line in open(MESSAGES, encoding="utf-8"):
-            m = json.loads(line)
-            p = m.get("voice_path")
-            if m.get("type") != "voice" or not p or not os.path.exists(p):
-                continue
-            key = os.path.basename(p)
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append({"key": key, "wav": p, "seconds": round((m.get("voice_ms") or 0) / 1000, 1),
-                        "time": m.get("time"), "chat": m.get("chat_name") or m.get("chat"),
-                        "sender": m.get("sender_name") or m.get("sender"), "split": split_of(key),
-                        "source": "wechat"})
+    for m in _jsonl(MESSAGES):
+        p = m.get("voice_path")
+        if m.get("type") != "voice" or not p or not os.path.exists(p):
+            continue
+        key = os.path.basename(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"key": key, "wav": p, "seconds": round((m.get("voice_ms") or 0) / 1000, 1),
+                    "time": m.get("time"), "chat": m.get("chat_name") or m.get("chat"),
+                    "sender": m.get("sender_name") or m.get("sender"), "split": split_of(key),
+                    "source": "wechat"})
     return out + [e for e in extras().values() if e["key"] not in seen and os.path.exists(e["wav"])]
 
 
@@ -71,10 +88,8 @@ def extras() -> dict:
     """Clips from every data/labels/extra_clips*.jsonl (videos with on-screen text, unlabeled web audio, …)."""
     out = {}
     for path in sorted(glob.glob(os.path.join(LABEL_DIR, "extra_clips*.jsonl"))):
-        for line in open(path, encoding="utf-8"):
-            if line.strip():
-                e = json.loads(line)
-                out[e["key"]] = {"split": "train", **e}
+        for e in _jsonl(path):
+            out[e["key"]] = {"split": "train", **e}
     return out
 
 
@@ -96,34 +111,17 @@ def drafts() -> dict:
 
 
 def labels() -> dict:
-    out = {}
-    if os.path.exists(LABELS):
-        for line in open(LABELS, encoding="utf-8"):
-            r = json.loads(line)
-            out[r["key"]] = r
-    return out
+    return {r["key"]: r for r in _jsonl(LABELS)}
 
 
 def bot_stt() -> dict:
     """What the bot transcribed while a chat was 开启 (data/voice_stt.jsonl): key -> record (latest)."""
-    out = {}
-    if os.path.exists(VOICE_STT):
-        for line in open(VOICE_STT, encoding="utf-8"):
-            if line.strip():
-                r = json.loads(line)
-                out[r["key"]] = r
-    return out
+    return {r["key"]: r for r in _jsonl(VOICE_STT)}
 
 
 def meanings() -> dict:
     """Mandarin glosses given earlier as CLI references (-e), keyed by file name."""
-    out = {}
-    if os.path.exists(RESULTS):
-        for line in open(RESULTS, encoding="utf-8"):
-            r = json.loads(line)
-            if r.get("expect"):
-                out[r["file"]] = r["expect"]
-    return out
+    return {r["file"]: r["expect"] for r in _jsonl(RESULTS) if r.get("expect")}
 
 
 def glossary() -> list[dict]:
@@ -145,10 +143,11 @@ def save_glossary(entries: list[dict]) -> list[dict]:
             avoid = re.split(r"[,，、\s]+", avoid)
         clean.append({"wu": wu, "mandarin": str(e.get("mandarin", "")).strip(),
                       "avoid": [a.strip() for a in avoid if a.strip() and a.strip() != wu]})
-    os.makedirs(LABEL_DIR, exist_ok=True)
-    with open(GLOSSARY + ".tmp", "w", encoding="utf-8") as f:
-        json.dump(clean, f, ensure_ascii=False, indent=1)
-    os.replace(GLOSSARY + ".tmp", GLOSSARY)
+    with GLOSSARY_LOCK:
+        os.makedirs(LABEL_DIR, exist_ok=True)
+        with open(GLOSSARY + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(clean, f, ensure_ascii=False, indent=1)
+        os.replace(GLOSSARY + ".tmp", GLOSSARY)
     return clean
 
 
@@ -161,7 +160,8 @@ def glossary_prompt() -> str:
 def vocab() -> set:
     if not os.path.exists(TOKENS):
         return set()
-    return {ln.split()[0] for ln in open(TOKENS, encoding="utf-8") if ln.strip()}
+    with open(TOKENS, encoding="utf-8") as f:
+        return {ln.split()[0] for ln in f if ln.strip()}
 
 
 def draft(keys: list[str] | None = None, log=print) -> int:
@@ -169,14 +169,17 @@ def draft(keys: list[str] | None = None, log=print) -> int:
     from stt.audio import Audio
     from stt.core import PROVIDERS
     with DRAFT_LOCK:
+        ready = [n for n in DRAFTERS if PROVIDERS[n].ready()]
+        if not ready:
+            return 0
         d = drafts()
         todo = [v for v in voices() if (keys is None or v["key"] in keys)
-                and any(n not in d.get(v["key"], {}) for n in DRAFTERS)][::-1]  # page order: newest / top first
+                and any(n not in d.get(v["key"], {}) for n in ready)][::-1]  # page order: newest / top first
         for v in todo:
             a = Audio(v["wav"])
             got = d.setdefault(v["key"], {})
-            for n in DRAFTERS:
-                if n in got or not PROVIDERS[n].ready():
+            for n in ready:
+                if n in got:
                     continue
                 try:
                     got[n] = PROVIDERS[n].run(a)
@@ -187,7 +190,7 @@ def draft(keys: list[str] | None = None, log=print) -> int:
             with open(DRAFTS + ".tmp", "w", encoding="utf-8") as f:
                 json.dump(d, f, ensure_ascii=False, indent=1)
             os.replace(DRAFTS + ".tmp", DRAFTS)
-            log(f"drafted {v['key']}: {got.get(DRAFTERS[0], '')}")
+            log(f"drafted {v['key']}: {got.get(ready[0], '')}")
         return len(todo)
 
 

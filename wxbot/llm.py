@@ -22,8 +22,12 @@ def _image_part(path):
     mime = mimetypes.guess_type(path)[0]
     if mime not in IMAGE_TYPES:
         return None
-    with open(path, "rb") as f:
-        data = base64.b64encode(f.read()).decode()
+    try:
+        with open(path, "rb") as f:
+            data = base64.b64encode(f.read()).decode()
+    except OSError as e:
+        log(f"llm: skipped unreadable image {path}: {e}")
+        return None
     return {"type": "input_image", "image_url": f"data:{mime};base64,{data}"}
 
 
