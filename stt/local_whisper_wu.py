@@ -135,6 +135,16 @@ def _patch_encoder(model):
     model.encoder.forward = types.MethodType(forward, model.encoder)
 
 
+def _half(model):
+    """fp16 parameters, except LayerNorm: whisper's LayerNorm runs on x.float() and needs fp32 weights."""
+    import torch
+    model = model.half()
+    for mod in model.modules():
+        if isinstance(mod, torch.nn.LayerNorm):
+            mod.float()
+    return model
+
+
 def _load(ckpt: str = OPENAI_CKPT):
     with _lock:
         if ckpt not in _models:
@@ -146,6 +156,10 @@ def _load(ckpt: str = OPENAI_CKPT):
             _patch_decoder(m, ckpt)
             if torch.backends.mps.is_available():  # the sparse alignment_heads buffer can't move to MPS
                 m.register_buffer("alignment_heads", m.alignment_heads.to_dense(), persistent=False)
+                # fp16 weights (as stored): decoding already computes in fp16 (fp16=True casts each weight
+                # per call), so keeping them fp32 only cost memory and time. Measured 2026-11-20 on 97
+                # labeled clips: identical transcripts, weights 2.95 -> 1.52 GB, ~25% faster.
+                m = _half(m)
                 m = m.to("mps")
             _patch_encoder(m)
             _models[ckpt] = m
