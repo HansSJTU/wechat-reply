@@ -22,6 +22,8 @@ would have to run on CPU. Trains on the Apple GPU (MPS) with fused AdamW and buc
 import argparse
 import os
 import random
+import re
+import subprocess
 import sys
 import time
 from types import SimpleNamespace
@@ -40,7 +42,56 @@ from stt.paths import MODELS  # noqa: E402
 BASE = os.path.join(MODELS, "whisper-medium-wu")
 OUT = os.path.join(MODELS, "whisper-wu-ft")
 VOCAB = 51865
+NEED_GB = 24  # roughly what a train run takes (GPU memory + the Python process); see the "gpu peak" log lines
+LABEL_SERVICE = "com.local.wechat-label"
 _tok = None
+
+
+def _run(*cmd) -> str:
+    return subprocess.run(cmd, capture_output=True, text=True).stdout
+
+
+def free_memory_gb() -> float:
+    """What macOS can hand out without compressing or swapping: RAM minus what Activity Monitor calls Memory
+    Used (app memory = anonymous − purgeable pages, wired, compressed). File cache counts as free."""
+    out = _run("vm_stat")
+    page = int(re.search(r"page size of (\d+)", out).group(1))
+    n = lambda k: int(re.search(rf"{k}:\s+(\d+)", out).group(1))
+    used = n("Anonymous pages") - n("Pages purgeable") + n("Pages wired down") + n("Pages occupied by compressor")
+    return (int(_run("sysctl", "-n", "hw.memsize")) - used * page) / 2**30
+
+
+def swap_used_gb() -> float:
+    m = re.search(r"used = ([\d.]+)M", _run("sysctl", "-n", "vm.swapusage"))
+    return float(m.group(1)) / 1024 if m else 0.0
+
+
+def memory_check(need_gb: float = NEED_GB):
+    """Warn before training if it won't fit in RAM. macOS doesn't fail then, it swaps: the 11-19 run (whisper-ft
+    v2) ran ~3.5 h with the GPU mostly idle, 34 GB of swap and ~3 TB written to the SSD."""
+    free = free_memory_gb()
+    print(f"memory: {free:.0f} GB free, training needs ~{need_gb:.0f} GB, swap in use {swap_used_gb():.1f} GB",
+          flush=True)
+    pids = _run("pgrep", "-f", "python.*labeling/label.py serve").split()
+    if pids:
+        print(f"  ! the labeling page is running (pid {', '.join(pids)}): its drafts keep two Whisper-Medium "
+              f"models on the GPU and it has used ~27 GB. Stop it for the run:\n"
+              f"      launchctl bootout gui/{os.getuid()}/{LABEL_SERVICE}\n"
+              f"    and bring it back afterwards with scripts/install.sh label", flush=True)
+    if free < need_gb:
+        print(f"  ! only {free:.0f} GB free: this run will swap and crawl. Biggest processes:", flush=True)
+        for line in _run("top", "-l", "1", "-o", "mem", "-n", "6", "-stats", "pid,mem,command").splitlines()[-6:]:
+            print("     ", line.rstrip(), flush=True)
+
+
+def cap_mps(fraction: float):
+    """Hard limit for MPS allocations, as a fraction of Metal's recommended working set (~28 GB on a 36 GB
+    machine). PyTorch's default (1.7×) lets MPS grow well past physical RAM and macOS swaps silently; under the
+    cap the allocator first frees its cache, then fails with 'MPS backend out of memory'. 0 = no limit."""
+    if fraction > 0:
+        torch.mps.set_per_process_memory_fraction(fraction)
+        print(f"MPS memory capped at {fraction * torch.mps.recommended_max_memory() / 2**30:.0f} GB "
+              f"(--mem-fraction {fraction})", flush=True)
 
 
 def tokenizer():
@@ -154,6 +205,10 @@ def train(args):
     torch.manual_seed(args.seed)
     tr, te = load_split("train"), load_split("test")
     dev = torch.device(args.device)
+    if dev.type == "mps":
+        memory_check()
+        cap_mps(args.mem_fraction)
+    swap0 = swap_used_gb()
     model = load_model(os.path.join(BASE, "whisper-medium.pt"))
     if dev.type == "mps":
         u2pp.mps_safe_convs(model)
@@ -169,7 +224,7 @@ def train(args):
         opt, lambda s: min((s + 1) / warm, max(0.0, (steps - s) / max(1, steps - warm))))
     model.train()
     for ep in range(1, args.epochs + 1):
-        t0, losses = time.time(), []
+        t0, losses, peak = time.time(), [], 0
         for batch in length_batches(tr, args.batch):
             out = model(batchify(batch, True, bucket=dev.type == "mps"), dev)
             opt.zero_grad()
@@ -178,6 +233,8 @@ def train(args):
             opt.step()
             sched.step()
             losses.append(out["loss"].item())
+            if dev.type == "mps":  # torch 2.5 has no peak counter for MPS: sample after every step
+                peak = max(peak, torch.mps.driver_allocated_memory())
         line = f"epoch {ep:2d}  loss {np.mean(losses):7.2f}  {time.time() - t0:4.0f}s"
         if ep % args.eval_every == 0 or ep == args.epochs:
             line += f"   {fmt_tests(model, te, dev)}"
@@ -185,7 +242,8 @@ def train(args):
             torch.save(model.state_dict(), os.path.join(OUT, "last.pt"))  # survives a crash later on
         if dev.type == "mps":  # every new shape caches memory; without this it grows until the GPU runs out
             torch.mps.empty_cache()
-            line += f"   gpu {torch.mps.driver_allocated_memory() / 2**30:.0f} GB"
+            line += (f"   gpu peak {peak / 2**30:.1f} GB, after empty_cache "
+                     f"{torch.mps.driver_allocated_memory() / 2**30:.1f} GB   swap {swap_used_gb() - swap0:+.1f} GB")
         print(line, flush=True)
     os.makedirs(OUT, exist_ok=True)
     path = os.path.join(OUT, "final.pt")
@@ -218,6 +276,8 @@ def main():
     t.add_argument("--eval-every", type=int, default=2)
     t.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")
     t.add_argument("--seed", type=int, default=0)
+    t.add_argument("--mem-fraction", type=float, default=1.0,
+                   help="MPS memory cap as a fraction of the recommended working set (~28 GB here); 0 = none")
     a = ap.parse_args()
     if a.cmd == "eval":
         dev = torch.device("mps" if torch.backends.mps.is_available() else "cpu")

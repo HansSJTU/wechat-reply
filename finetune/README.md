@@ -59,6 +59,17 @@ length and the MPS cache is emptied each epoch: with short word clips and long s
 every step had a new shape, MPS kept memory for each, and an epoch went from 1.5 min to an hour before running out
 of memory. A test clip whose greedy decoding loops past the decoder's 448 positions counts as all wrong.
 
+Memory guards (36 GB machine): on MPS, PyTorch lets allocations grow to 1.7× Metal's recommended working set,
+and macOS swaps instead of failing. The 11-19 run (whisper-ft v2) peaked at 67 GB with 34 GB of swap, ran
+~3.5 h with the GPU mostly idle and wrote ~3 TB to the SSD. So `train` now:
+- caps MPS at `--mem-fraction 1.0` of the working set (~28 GB): past it, the run stops with
+  "MPS backend out of memory" instead of swapping (`0` = no cap);
+- checks free memory before it starts (RAM minus Activity Monitor's Memory Used) and warns below ~24 GB,
+  listing the biggest processes, and whenever the labeling page is running: its drafts keep two
+  Whisper-Medium models on the GPU (it has reached ~27 GB). Stop it with
+  `launchctl bootout gui/$(id -u)/com.local.wechat-label`, bring it back with `scripts/install.sh label`;
+- logs each epoch's `gpu peak` (MPS driver memory, sampled after every step) and the swap grown since the start.
+
 The openai-whisper conversion (`stt/local_whisper_wu.py`) keeps WeNet's output layer: openai-whisper ties the
 logits to the token embedding with no bias, while WeNet's output layer has a bias and, once fine-tuned, its own
 weight. It is saved next to the checkpoint (`*.output_layer.pt`) and patched into the decoder; dropping it cost
