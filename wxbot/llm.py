@@ -17,6 +17,33 @@ WEEKDAYS = "一二三四五六日"
 # web search answers carry markdown citations; WeChat shows them raw
 LINK = re.compile(r"\s*\(\[([^\]]*)\]\([^)]*\)\)|\[([^\]]*)\]\(https?://[^)]*\)")
 
+# WeChat turns "[微笑]"-style codes in a text message into its own 表情, so replies use those instead of
+# Unicode emoji (config [llm] wechat_emoji = false turns this off). Emoji not listed here are left as they are.
+EMOJI_HINT = ("想加表情时用微信自带的表情代码，比如 [微笑] [呲牙] [偷笑] [捂脸] [破涕为笑] [旺柴] [强] [抱拳] "
+              "[玫瑰] [爱心] [庆祝]，不要用 emoji 字符；不是每句都要加。")
+WECHAT_EMOJI = {
+    "😊": "微笑", "🙂": "微笑", "☺": "微笑", "😀": "呲牙", "😁": "呲牙", "😃": "呲牙", "😄": "呲牙",
+    "😆": "憨笑", "😂": "破涕为笑", "🤣": "破涕为笑", "😅": "擦汗", "😓": "汗", "🤭": "偷笑",
+    "😉": "调皮", "😜": "调皮", "😛": "调皮", "😝": "调皮", "😏": "坏笑", "😎": "得意",
+    "😍": "色", "🥰": "色", "😘": "亲亲", "😳": "脸红", "🥺": "可怜", "😬": "尴尬",
+    "😢": "流泪", "😥": "流泪", "😭": "大哭", "😔": "难过", "😞": "难过", "🙁": "难过", "☹": "难过",
+    "😠": "发怒", "😡": "发怒", "😮": "惊讶", "😯": "惊讶", "😲": "惊讶", "😱": "惊恐",
+    "😐": "无语", "😑": "无语", "🙄": "白眼", "🤔": "疑问", "😴": "睡", "😷": "生病",
+    "🤦": "捂脸", "🤗": "拥抱", "🧐": "让我看看", "👋": "再见", "🍉": "吃瓜",
+    "👍": "强", "👎": "弱", "👏": "鼓掌", "🙏": "合十", "🤝": "握手", "✌": "胜利", "👌": "OK",
+    "👊": "拳头", "✊": "拳头", "💪": "加油", "❤": "爱心", "♥": "爱心", "💕": "爱心", "💔": "心碎",
+    "🌹": "玫瑰", "🎂": "蛋糕", "🍺": "啤酒", "🍻": "啤酒", "☕": "咖啡", "🎁": "礼物",
+    "🎉": "庆祝", "🥳": "庆祝", "🧧": "红包", "🎆": "烟花", "🧨": "爆竹", "🌙": "月亮", "☀": "太阳",
+    "💩": "便便",
+}
+# skin tones, emoji presentation selector and "‍♂️"/"‍♀️" endings belong to the emoji they follow
+EMOJI = re.compile("(" + "|".join(sorted(WECHAT_EMOJI, key=len, reverse=True))
+                   + ")(?:[\U0001F3FB-\U0001F3FF]|️|‍[♀♂]️?)*")
+
+
+def wechat_emoji(text):
+    return EMOJI.sub(lambda m: f"[{WECHAT_EMOJI[m.group(1)]}]", text)
+
 
 def _image_part(path):
     mime = mimetypes.guess_type(path)[0]
@@ -85,7 +112,8 @@ def reply(cfg, history, group=False, extra=None):
     """cfg: the [llm] table; extra: more instructions for this one reply. Returns the reply text
     ('' means stay silent)."""
     system = cfg["system_prompt"] + ("\n" + cfg["group_prompt"] if group and cfg.get("group_prompt") else "")
-    system += ("\n" + extra if extra else "") + "\n" + _now()
+    emoji = cfg.get("wechat_emoji", True)
+    system += ("\n" + EMOJI_HINT if emoji else "") + ("\n" + extra if extra else "") + "\n" + _now()
     body = {"model": cfg.get("model", "gpt-5.5"), "instructions": system,
             "input": build_input(history, int(cfg.get("max_images", 3)))}
     if cfg.get("reasoning_effort"):
@@ -100,6 +128,8 @@ def reply(cfg, history, group=False, extra=None):
     if searches:
         log(f"llm web search x{len(searches)}: " + " | ".join(q for q in searches if q)[:200])
     text = _clean(text)
+    if emoji:
+        text = wechat_emoji(text)
     return "" if SILENT in text else text
 
 

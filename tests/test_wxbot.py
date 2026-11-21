@@ -94,6 +94,18 @@ class TestLLM(unittest.TestCase):
     def test_clean_and_missing_image(self):
         self.assertEqual(llm._clean("今天晴 ([天气网](https://example.com))，**注意保暖**"), "今天晴，注意保暖")
         self.assertEqual(llm._clean("详见[公告](https://example.com/a)"), "详见公告")
+
+    def test_wechat_emoji(self):
+        self.assertEqual(llm.wechat_emoji("好的👍🏻 哈哈😂❤️"), "好的[强] 哈哈[破涕为笑][爱心]")
+        self.assertEqual(llm.wechat_emoji("🤦‍♂️ 🙏🏽"), "[捂脸] [合十]")
+        self.assertEqual(llm.wechat_emoji("🚀 不变"), "🚀 不变")
+        body = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "辛苦了🙏"}]}]}
+        resp = type("R", (), {"status_code": 200, "json": lambda self: body})()
+        cfg = {"system_prompt": "x", "web_search": False}
+        with patch("wxbot.llm.keys.get", return_value="k"), patch("wxbot.llm.httpx.post", return_value=resp) as post:
+            self.assertEqual(llm.reply(cfg, [{"role": "user", "text": "hi"}]), "辛苦了[合十]")
+            self.assertIn("[微笑]", post.call_args.kwargs["json"]["instructions"])
+            self.assertEqual(llm.reply({**cfg, "wechat_emoji": False}, [{"role": "user", "text": "hi"}]), "辛苦了🙏")
         self.assertIsNone(llm._image_part("/nonexistent/wxbot_deleted.jpg"))
         inp = llm.build_input([{"role": "user", "text": "[图片]", "image_path": "/nonexistent/deleted.jpg"}], 3)
         self.assertEqual(len(inp[0]["content"]), 1)

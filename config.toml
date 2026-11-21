@@ -35,6 +35,8 @@ max_images = 3              # only the newest N images in the window are attache
 web_search = true           # OpenAI built-in web search (weather, news, …); adds a few seconds when used
 location = { country = "CN", region = "Beijing", city = "Beijing" }   # where "today's weather" is
 timeout_seconds = 60
+wechat_emoji = true         # replies use WeChat 表情 codes ([微笑] [呲牙] …) instead of Unicode emoji:
+                            # the model is told so, and common emoji it still writes are mapped (wxbot/llm.py)
 system_prompt = """你是一个友好的聊天伙伴，正在微信上和朋友聊天。
 用简体中文，像真人发微信一样简短自然地回复，一般一两句话，不用 Markdown。
 消息里的 [语音] 是语音转写的文字，可能有错字，按意思理解；[图片] 后面附有图片。
